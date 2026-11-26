@@ -89,11 +89,18 @@ Constraint: use as few paid drafts as possible.
 - Remote Control: the folder appears in the Remote Control list, but the PC does not offer
   it to cloud sessions. The reason isn't known; it may need a desktop app update. Fallback:
   run Claude Code locally on the PC.
+- As of 2026-11-26, work runs locally on the PC (Claude desktop app). The repo is cloned at
+  %USERPROFILE%\mtg-draft-bot\repo, the cube logs are in repo/logs/ (git-ignored), and
+  Python 3.13.3 is installed. The PC can reach both 17Lands hosts.
 
 ## Next steps
-1. `scripts/download_17lands.py`: rerunnable. Takes a set code and event type, reads
-   https://www.17lands.com/api/public_datasets, downloads the matching files into
-   data/raw/, and skips files whose last_updated date hasn't changed.
+1. DONE (2026-11-26): `scripts/download_17lands.py`. Takes `--set` (code like FDN or name
+   like "Powered Cube"), `--event` and `--types` (default draft and game; replay is
+   opt-in because it is large). Saves to data/raw/ with a manifest.json and skips files
+   whose last_updated date and ETag haven't changed. Powered Cube PremierDraft draft and
+   game files are downloaded locally (93 MB and 27 MB).
+   Note: the API's "expansion" is the display name ("Powered Cube"), but file names use
+   "Cube_-_Powered". The script accepts either.
 2. Load the game data into a sparse deck matrix and train the factorization machine. Report
    held-out log-loss and AUC against simpler baselines (per-card win rates, logistic
    regression with no pairwise terms).
