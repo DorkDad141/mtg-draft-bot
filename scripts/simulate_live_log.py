@@ -24,66 +24,47 @@ Examples:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import threading
 import time
-import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from mtgdraft.carddb import ArenaCardDB  # noqa: E402
+from mtgdraft.draft_report import DraftReport, Step, render  # noqa: E402
 from mtgdraft.model.scorer import PickScorer, load_scorer  # noqa: E402
+from mtgdraft.reader.archive import open_log  # noqa: E402
 from mtgdraft.reader import ArenaLogReader, DraftState  # noqa: E402
 from mtgdraft.reader.arena_log import set_and_event  # noqa: E402
 
 DEFAULT_OUT = REPO_ROOT / "data" / "sim" / "Player.log"
+REPORTS_DIR = REPO_ROOT / "data" / "reports"
 PREFIX = "[UnityCrossThreadLogger]"
 
 
 # ---- building the simulated log ------------------------------------------------
-def queue_line(event_name: str) -> str:
-    j = {"fromSceneName": "EventLanding", "toSceneName": "TableDraftQueue", "initiator": "System",
-         "context": f"Entering table draft queue: {event_name}"}
-    return f"{PREFIX}Client.SceneChange {json.dumps(j)}"
-
-
-def notify_line(draft_id: str, slot, cards) -> str:
-    j = {"draftId": draft_id, "SelfPick": slot[1], "SelfPack": slot[0],
-         "PackCards": ",".join(str(c) for c in cards)}
-    return f"{PREFIX}Draft.Notify {json.dumps(j, separators=(',', ':'))}"
-
-
-def pick_line(draft_id: str, slot, card: int) -> str:
-    req = {"DraftId": draft_id, "GrpIds": [card], "Pack": slot[0], "Pick": slot[1]}
-    j = {"id": str(uuid.uuid4()), "request": json.dumps(req, separators=(',', ':'))}
-    return f"{PREFIX}==> EventPlayerDraftMakePick {json.dumps(j, separators=(',', ':'))}"
-
-
-def pool_lines(event_name: str, pool: list[int]) -> list[str]:
-    rid = str(uuid.uuid4())
-    course = {"CourseId": str(uuid.uuid4()), "InternalEventName": event_name,
-              "CurrentModule": "DeckSelect", "ModulePayload": "", "CardPool": pool}
-    return [f"<== DraftCompleteDraft({rid})", json.dumps(course, separators=(',', ':'))]
+from mtgdraft.reader.simulate import notify_line, pick_line, pool_lines, queue_line  # noqa: E402
 
 
 # ---- watching ------------------------------------------------------------------
 class Watcher:
     """Prints each pack ranked by the bot as the live reader sees it."""
 
-    def __init__(self, db: ArenaCardDB, top: int | None, pick_source: dict):
+    def __init__(self, db: ArenaCardDB, top: int | None, pick_source: dict, card_info: dict | None = None):
         self.db = db
+        self.card_info = card_info          # set -> deck-aware scorer; None -> plain scorer
         self.top = top
         self.pick_source = pick_source      # slot -> "logged" / "inferred" / "bot"
         self.ranked: dict = {}              # slot -> [(name, score), ...]
         self.agree = self.compared = 0
         self.lock = threading.Lock()
+        self.steps: dict = {}               # slot -> report Step, in the order seen
 
     def scorer(self, d: DraftState) -> PickScorer | None:
         set_code, event = set_and_event(d, lambda g: (self.db.get(g).set_code if self.db.get(g) else "?"))
-        return load_scorer(set_code, event)
+        return load_scorer(set_code, event, card_info=self.card_info)
 
     def __call__(self, d: DraftState, kind: str) -> None:
         with self.lock:
@@ -107,6 +88,11 @@ class Watcher:
             return
         ranked = sc.rank(pack, pool)
         self.ranked[slot] = ranked
+        lanes = sc.lanes(pool) if hasattr(sc, "lanes") else None
+        self.steps[slot] = Step(slot, list(d.pool_before(slot)), list(d.packs[slot]), sc.explain(pack, pool),
+                                lanes=lanes)
+        if lanes:
+            print("  projected deck: " + " | ".join(f"{p} {w:.0%}" for p, w, _ in lanes), flush=True)
         shown = ranked if self.top is None else ranked[:self.top]
         for i, (name, s) in enumerate(shown, 1):
             score = "   --  " if s != s else f"{s:+.3f}"
@@ -118,6 +104,8 @@ class Watcher:
         slot = max(d.picks)                      # the pick just made
         name = self.db.name(d.picks[slot])
         src = self.pick_source.get(slot, "logged")
+        step = self.steps.setdefault(slot, Step(slot, list(d.pool_before(slot)), None, None))
+        step.pick, step.pick_source = d.picks[slot], src
         label = {"logged": "your pick", "inferred": "your pick (inferred from final pool)",
                  "bot": "bot's pick (your pick unknown)"}[src]
         ranked = self.ranked.get(slot)
@@ -155,12 +143,17 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=None, help="Show only the top N cards per pack (default: all)")
     ap.add_argument("--bot-picks", action="store_true", help="Let the bot make picks that are unknown")
     ap.add_argument("--no-watch", action="store_true", help="Only write the simulated log")
+    ap.add_argument("--scorer", choices=["deck", "plain"], default="deck",
+                    help="deck: deck-aware scorer that commits to colors (default); plain: card value + pool synergy")
+    ap.add_argument("--report", nargs="?", const="auto", default=None, metavar="PATH",
+                    help="Also write an HTML report of every step (default path data/reports/draft_<id>.html)")
     args = ap.parse_args()
 
     db = ArenaCardDB()
+    card_info = db.by_name() if args.scorer == "deck" else None
     src = ArenaLogReader()
     for p in args.logs:
-        src.feed(open(p, encoding="utf-8", errors="replace"))
+        src.feed(open_log(p))
     src.finalize()
     if not src.drafts:
         sys.exit("No drafts found in those logs.")
@@ -173,7 +166,7 @@ def main() -> int:
     d = choose_draft(src.drafts, args.draft)
     event_name = d.event_name or "Unknown_Draft"
     set_code, event = set_and_event(d, lambda g: (db.get(g).set_code if db.get(g) else "?"))
-    bot = load_scorer(set_code, event)
+    bot = load_scorer(set_code, event, card_info=card_info)
     print(f"Simulating {d.summary()}")
     print(f"Set {set_code}, {event}; model: {'yes' if bot else 'NONE (train one with train_deck_model.py)'}")
     print(f"Writing {args.out}")
@@ -207,7 +200,7 @@ def main() -> int:
     watcher = stop = thread = None
     poll = 0.05
     if not args.no_watch:
-        watcher = Watcher(db, args.top, pick_source)
+        watcher = Watcher(db, args.top, pick_source, card_info)
         stop = threading.Event()
         live = ArenaLogReader(on_update=watcher)
         thread = threading.Thread(target=live.follow, args=(args.out, poll, stop.is_set), daemon=True)
@@ -233,6 +226,20 @@ def main() -> int:
         unknown = [s for s in d.packs if s not in pick_source]
         if unknown:
             print(f"{len(unknown)} picks unknown and skipped (use --bot-picks to let the bot pick).")
+        if args.report:
+            suffix = "" if args.scorer == "deck" else "_plain"
+            path = Path(args.report) if args.report != "auto" else REPORTS_DIR / f"draft_{d.draft_id[:8]}{suffix}.html"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            mode = " (bot made the unknown picks)" if n else ""
+            rep = DraftReport(
+                title=f"Draft {d.draft_id[:8]} · {set_code} {event} · {args.scorer} scorer",
+                subtitle=f"{event_name} · simulated live from the recorded log{mode} · "
+                         f"{len(d.packs)} packs, {sum(1 for v in pick_source.values() if v != 'bot')} known picks",
+                steps=[watcher.steps[k] for k in sorted(watcher.steps)])
+            path.write_text(render(rep, db), encoding="utf-8")
+            print(f"Report written to {path}")
+    elif args.report:
+        print("--report needs watch mode (drop --no-watch).")
     print(f"Simulated log written to {args.out}")
     return 0
 

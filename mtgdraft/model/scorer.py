@@ -71,23 +71,69 @@ class PickScorer:
             out.append((name, s))
         return sorted(out, key=lambda t: -np.nan_to_num(t[1], nan=-1e9))
 
+    def explain(self, pack: list[str], pool: list[str], n_partners: int = 2) -> list[dict]:
+        """Like rank(), but splits each score into card value and pool synergy, and names
+        the pool cards that pair best and worst with it. Sorted best first."""
+        pool_idx = [self._idx[n] for n in pool if n in self._idx]
+        V = self.fm.V if self.fm.config.k else np.zeros((len(self.card_names), 0), np.float32)
+        out = []
+        for name in pack:
+            i = self._idx.get(name)
+            if i is None or name in self.never_pick:
+                out.append({"name": name, "score": float("nan"), "value": float("nan"),
+                            "synergy": float("nan"), "best": [], "worst": [],
+                            "note": "basic land" if name in self.never_pick else "not in model"})
+                continue
+            value = float(self.fm.w_card[i])
+            pair = (V[pool_idx] @ V[i]) * self.synergy_weight if pool_idx else np.zeros(0)
+            syn = float(pair.sum())
+            order = np.argsort(pair)
+            best = [(self.card_names[pool_idx[j]], float(pair[j])) for j in order[::-1][:n_partners] if pair[j] > 0]
+            worst = [(self.card_names[pool_idx[j]], float(pair[j])) for j in order[:n_partners] if pair[j] < 0]
+            out.append({"name": name, "score": value + syn, "value": value, "synergy": syn,
+                        "best": best, "worst": worst, "note": ""})
+        return sorted(out, key=lambda r: -np.nan_to_num(r["score"], nan=-1e9))
+
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
+SHRINK_PRIOR_DECKS = 50.0
 _cache: dict[tuple, "PickScorer | None"] = {}
 
 
 def load_scorer(set_code: str | None, event: str = "PremierDraft",
-                models_dir: Path = MODELS_DIR) -> "PickScorer | None":
-    """Load the trained FM for a set/event as a PickScorer, or None if there is no model."""
-    key = (set_code, event, str(models_dir))
+                models_dir: Path = MODELS_DIR, card_info: dict | None = None):
+    """Load the trained FM for a set/event, or None if there is no model.
+
+    With `card_info` (name -> card with colors/types, e.g. ArenaCardDB().by_name()) this
+    returns the deck-aware scorer, which knows colors; without it, the plain PickScorer.
+    """
+    key = (set_code, event, str(models_dir), card_info is not None)
     if key not in _cache:
         path = Path(models_dir) / f"fm.{set_code}.{event}.npz"
         if set_code and path.exists():
             fm, names = FactorizationMachine.load(path)
-            _cache[key] = PickScorer(fm, names["cards"])
+            shrink_by_evidence(fm, names.get("meta", {}).get("card_decks"))
+            if card_info is not None:
+                from .deck_scorer import DeckAwareScorer
+                _cache[key] = DeckAwareScorer(fm, names["cards"], card_info)
+            else:
+                _cache[key] = PickScorer(fm, names["cards"])
         else:
             _cache[key] = None
     return _cache[key]
+
+
+def shrink_by_evidence(fm: FactorizationMachine, card_decks, prior_decks: float = SHRINK_PRIOR_DECKS) -> None:
+    """Shrink each card's value and synergy terms toward zero by n / (n + prior), where n is
+    how many training decks played it. Rare cards (a few decks) are otherwise over-trusted;
+    well-observed cards are essentially unchanged."""
+    if not card_decks:
+        return
+    n = np.asarray(card_decks, dtype=np.float64)
+    f = (n / (n + prior_decks)).astype(np.float32)
+    fm.w_card = fm.w_card * f
+    if fm.config.k:
+        fm.V = fm.V * np.sqrt(f)[:, None]
 
 
 def linear_scorer(weights: np.ndarray, card_names: list[str]) -> PickScorer:

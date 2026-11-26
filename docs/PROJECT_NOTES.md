@@ -141,7 +141,20 @@ Constraint: use as few paid drafts as possible.
      because later packs still reflect the real picks). Tested in-process and with
      `show_draft.py --live` as a separate process; both see every pack.
    - Model loading is shared through `mtgdraft.model.scorer.load_scorer(set, event)`.
-5. Card database (Scryfall), then overlay.
+5. DONE (2026-11-26): live assistant and overlay. `scripts/draft_assistant.py --top N`
+   (see "Live assistant and overlay" below, and docs/TRK_TEST.md for the test plan).
+6. Also done 2026-11-26: deck-aware scorer (now the default), TRK support with decks
+   rebuilt from draft data, Arena log archiver, pick-by-pick HTML reports.
+
+### Next steps (after the first live TRK test)
+- Review the live test: console output, data/reports/ report, logs/archive/.
+- If cards are missed on the real Arena screen: tune ART frame proportions in
+  mtgdraft/overlay/locate.py for Arena's card rendering, or add more frame types.
+- Retrain TRK when 17Lands publishes TRK game data (the pipeline switches to game
+  data automatically): download_17lands.py --set TRK --types draft game, then train.
+- Splash support in the deck-aware scorer (only two-color pairs today).
+- Optional: a pick model trained on draft data (signals, wheel estimates).
+- Merge the feature branches into main.
 
 ## Deck model results (Powered Cube PremierDraft, 2026-11-26)
 - Data: 266,117 games from 47,592 drafts, played 2025-10-30 to 2025-11-19, with 545 cards.
@@ -231,6 +244,86 @@ Constraint: use as few paid drafts as possible.
   restarted at that moment.
 - On that draft, the SOS scorer's top pick matched the user's on 11/38 picks (29%), close
   to the 24% offline agreement rate.
+
+## Deck-aware scorer (2026-11-26, default)
+- Problem found: the plain scorer (card value + synergy with the whole pool) was
+  color-blind. Bot-drafted SOS pools had only 50% of nonland cards castable in their best
+  two colors (humans: 63% on the user's draft), because off-color pair penalties are about
+  20x smaller than card values, and every pool card counted as if it would be played.
+- Fix: `mtgdraft/model/deck_scorer.py`. For each of the 10 color pairs, project the
+  pool's best 23 castable spells (plus that pair's basics, whose learned pairings give a
+  color signal), weight pairs by softmax(deck strength / temperature), and score a
+  candidate by its softplus gain over the cut line (replacement level while slots are
+  open, else the weakest deck card), weighted across pairs. Off-color cards and cards that
+  wouldn't make the deck score near zero; mono-color cards fit 4 of 10 pairs and gold
+  cards 1 early on. Lands must beat replacement level too.
+- Tuned on validation drafts: temperature 0.05, replacement quantile 0.7.
+- Card values are shrunk by evidence when scoring: w * n/(n+50), with n the number of
+  training decks that played the card (saved in the model as card_decks). This stops
+  barely-played cards (e.g. TRK's Bruvac, 2 decks) from topping the list.
+- Held-out test results (eval_picks.py; color fit = share of the bot's own pool castable
+  in its best pair, bot drafting along the packs humans saw, 300 drafts):
+
+  | set | scorer | top-1 agreement | color fit (humans) | wins/agree |
+  |---|---|---|---|---|
+  | TRK | plain | 0.268 | 59% (79%) | +3.82 +/- 0.51 |
+  | TRK | deck-aware | 0.330 | 73% | +3.58 +/- 0.45 |
+  | SOS | plain | 0.327 | 53% (76%) | +2.57 +/- 0.23 |
+  | SOS | deck-aware | 0.416 | 63% | +2.84 +/- 0.20 |
+  | Cube | plain | 0.238 | 57% (77%) | +4.76 +/- 0.41 |
+  | Cube | deck-aware | 0.293 | 75% | +4.38 +/- 0.34 |
+
+  The deck-aware scorer agrees with humans much more often and commits to colors much
+  better. Its association with winning is about the same as the plain scorer's (within
+  noise). The color-fit check is approximate: later packs follow the human's picks.
+
+## Star Trek (TRK) support (2026-11-26)
+- 17Lands publishes TRK draft data only (Premier, Trad, PickTwo; Nov 10-22, 23,785 Premier
+  drafts). No game data yet.
+- `games.load_draft_decks()` rebuilds decks from draft data: a pick is a deck card if its
+  pick_maindeck_rate >= 0.5 (fractional rates inflated rare cards' weights), and each
+  draft's match record becomes one row per match. `load_deck_data()` uses game data when
+  it exists and falls back to this. No basics in these decks.
+- TRK model: 123,725 match rows / 22,701 drafts / 341 cards. Test log-loss: logreg 0.67458,
+  FM (k=16, l2_v=0.01) 0.67438 (-0.00020 +/- 0.00009). Small data, so synergy needs strong
+  regularization (default l2_v grid widened to 1e-3..3e-2).
+- TRK draft data includes P1P1 (42 picks per draft), unlike the older cube data.
+- Arena's card DB (updated 2026-11-26) has all 447 TRK printings; all 341 model names match.
+- Scryfall has no Arena IDs for TRK yet; card art is looked up by name + set (trk).
+
+## Live assistant and overlay (2026-11-26)
+- `scripts/draft_assistant.py --top N`: follows the Arena log, ranks each pack with the
+  deck-aware scorer, shows an always-on-top advisor panel, and blacks out all but the top N
+  cards on screen. Archives earlier logs at start. Auto-downloads 17Lands data and trains a
+  model if the set has none.
+- Card finding (`mtgdraft/overlay/locate.py`): the log says which cards are in the pack;
+  each card's Scryfall art_crop is matched to a screenshot with SIFT + RANSAC homography,
+  then expanded to the full card with frame proportions (normal and Saga frames). No fixed
+  positions. Synthetic test (`scripts/test_locator.py`): 158/160 cards boxed (IoU >= 0.7),
+  0 wrong boxes, at 720p to 4K and 115-360 px wide cards, ~0.65 s per screenshot.
+- Overlay window (`mtgdraft/overlay/window.py`): borderless, click-through
+  (WS_EX_TRANSPARENT), no-activate, topmost (re-asserted on every draw; note HWND_TOPMOST
+  must be passed as a pointer-sized handle on 64-bit), excluded from screen capture
+  (WDA_EXCLUDEFROMCAPTURE) so it never hides cards from the locator. Boxes are sticky per
+  pick. DPI-aware, so screenshots and windows share physical pixels.
+- End-to-end test passed: a held-out 17Lands TRK draft fed as a fake live log, a fake Arena
+  window showing the packs; every pick located 8/8 to 13/14 cards and the overlay blacked
+  out all but the top 3 with rank badges.
+- Arena on this PC is set to borderless fullscreen (Unity "Fullscreen mode" = 1) at
+  1920x1080, which overlays can draw over. Exclusive fullscreen (0) would hide them.
+- Not yet verified against the real Arena draft screen (needs a live draft): Arena's card
+  rendering or special printings may differ from Scryfall art.
+
+## Where the Powered Cube logs went (checked 2026-11-26)
+- No Powered Cube logs exist on this PC. Arena's Player-prev.log was the 2026-05-09 SOS
+  session until Arena was launched on 2026-11-26, so Arena was not run on this Windows
+  account in between. Untapped.gg Companion's saved drafts (drafts.json) are the same 6
+  SOS drafts. The PC's other Windows account has no Arena data.
+- The cube drafts were most likely played on another device; the user's 17Lands or
+  Untapped.gg account may have them online.
+- `scripts/archive_logs.py` now keeps every session (gzip, logs/archive/); the live
+  assistant archives at start. Arena was relaunched at ~11:19 on 2026-11-26, which
+  overwrote the May 9 log in Arena's folder; the project's copies are in the archive.
 
 ## Known gotchas
 - P1P1: RESOLVED for Arena logs. Draft.Notify includes P1P1 with all 14 cards (checked on

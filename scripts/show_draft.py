@@ -20,9 +20,17 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from mtgdraft.carddb import ArenaCardDB  # noqa: E402
-from mtgdraft.model.scorer import load_scorer as scorer_for  # noqa: E402
+from mtgdraft.model.scorer import load_scorer  # noqa: E402
+from mtgdraft.reader.archive import archive_logs, open_log  # noqa: E402
 from mtgdraft.reader import ArenaLogReader, DraftState, default_arena_log_path  # noqa: E402
 from mtgdraft.reader.arena_log import set_and_event  # noqa: E402
+
+
+CARD_INFO: dict | None = None
+
+
+def scorer_for(set_code, event):
+    return load_scorer(set_code, event, card_info=CARD_INFO)
 
 
 def _fmt(name: str, score: float) -> str:
@@ -75,15 +83,26 @@ def show(d: DraftState, db: ArenaCardDB, top: int) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("logs", nargs="*", help="Player-prev.log / Player.log, oldest first")
+    ap.add_argument("logs", nargs="*", help="Player-prev.log / Player.log or archived .log.gz files, oldest first")
     ap.add_argument("--live", action="store_true", help="Follow the running Arena Player.log")
     ap.add_argument("--top", type=int, default=3)
+    ap.add_argument("--scorer", choices=["deck", "plain"], default="deck",
+                    help="deck: deck-aware scorer that commits to colors (default); plain: card value + pool synergy")
     args = ap.parse_args()
     db = ArenaCardDB()
+    global CARD_INFO
+    CARD_INFO = db.by_name() if args.scorer == "deck" else None
 
     if args.live:
         sys.stdout.reconfigure(line_buffering=True)   # show each pack immediately, even when piped
-        path =Path(args.logs[0]) if args.logs else default_arena_log_path()
+        path = Path(args.logs[0]) if args.logs else default_arena_log_path()
+        if not args.logs:
+            try:   # save earlier sessions before Arena can overwrite them
+                saved = [r for r in archive_logs() if r.action in ("new", "updated")]
+                if saved:
+                    print(f"Archived {len(saved)} Arena log(s) to logs/archive/")
+            except OSError as e:
+                print(f"(log archive skipped: {e})")
         print(f"Following {path} (Ctrl+C to stop)")
 
         def on_update(d: DraftState, kind: str) -> None:
@@ -112,7 +131,7 @@ def main() -> int:
         ap.error("give log files, or --live")
     reader = ArenaLogReader()
     for p in args.logs:
-        reader.feed(open(p, encoding="utf-8", errors="replace"))
+        reader.feed(open_log(p))
     reader.finalize()
     if not reader.drafts:
         print("No drafts found.")

@@ -36,7 +36,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from mtgdraft.model.baselines import card_logit_win_rates  # noqa: E402
 from mtgdraft.model.drafts import load_picks  # noqa: E402
 from mtgdraft.model.fm import FactorizationMachine  # noqa: E402
-from mtgdraft.model.games import load_games, split_label  # noqa: E402
+from mtgdraft.model.games import load_deck_data, split_label  # noqa: E402
+from mtgdraft.model.deck_scorer import PAIRS, DeckAwareScorer  # noqa: E402
 from mtgdraft.model.scorer import PickScorer, linear_scorer  # noqa: E402
 
 STRONG_WR, STRONG_GAMES = 0.60, 50
@@ -97,11 +98,50 @@ def evaluate(name, scorer, picks, strong, stage, results, verbose=True):
     return r
 
 
+def pool_fit(names: list[str], info: dict) -> float:
+    """Share of the pool's nonland cards castable in its best two-color pair."""
+    cards = [info.get(n) for n in names]
+    cols = [set(c.colors) for c in cards if c is not None and "Land" not in c.types]
+    if not cols:
+        return float("nan")
+    return max(sum(1 for cs in cols if cs <= set(pair)) for pair in PAIRS) / len(cols)
+
+
+def color_fit(scorer, picks_all, rows: np.ndarray, card_names, info, n_drafts: int) -> tuple[float, float]:
+    """Bot drafts its own pool along the packs each human saw; returns (bot fit, human fit).
+
+    Approximate: later packs still reflect the human's picks, not the bot's."""
+    meta = picks_all.meta.iloc[rows]
+    drafts = sorted(meta["draft_id"].unique())[:n_drafts]
+    by_draft = meta[meta["draft_id"].isin(drafts)].groupby("draft_id")
+    bot_fits, human_fits = [], []
+    for _, g in by_draft:
+        g = g.sort_values(["pack_number", "pick_number"])
+        pool: list[str] = []
+        for r in g.index:
+            pack = [card_names[i] for i, c in zip(picks_all.pack[r].indices, picks_all.pack[r].data) for _ in range(int(c))]
+            ranked = scorer.rank(pack, pool)
+            pool.append(ranked[0][0])
+        last = g.index[-1]
+        human = [card_names[i] for i, c in zip(picks_all.pool[last].indices, picks_all.pool[last].data) for _ in range(int(c))]
+        if picks_all.pick[last] >= 0:
+            human.append(card_names[picks_all.pick[last]])
+        bot_fits.append(pool_fit(pool, info))
+        human_fits.append(pool_fit(human, info))
+    return float(np.nanmean(bot_fits)), float(np.nanmean(human_fits))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--set", default="Cube_-_Powered")
     ap.add_argument("--event", default="PremierDraft")
-    ap.add_argument("--synergy", type=float, nargs="+", default=[0.25, 0.5, 1.0, 2.0])
+    ap.add_argument("--synergy", type=float, nargs="+", default=[1.0])
+    ap.add_argument("--deck-temps", type=float, nargs="+", default=[0.02, 0.05, 0.1],
+                    help="Deck-aware scorer: pair softmax temperatures to try on validation")
+    ap.add_argument("--deck-quantiles", type=float, nargs="+", default=[0.5, 0.7],
+                    help="Deck-aware scorer: replacement-level quantiles to try on validation")
+    ap.add_argument("--fit-drafts", type=int, default=300,
+                    help="Drafts per split for the bot color-fit check (0 to skip)")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -111,7 +151,7 @@ def main() -> int:
     lr, _ = FactorizationMachine.load(models / f"logreg.{args.set}.{args.event}.npz")
     card_names = names["cards"]
 
-    games = load_games(raw / f"game_data_public.{args.set}.{args.event}.csv.gz")
+    games, _ = load_deck_data(raw, args.set, args.event)
     train_games = games.subset(np.flatnonzero(split_label(games.draft_id) == 0))
     lwr = card_logit_win_rates(train_games.cards, train_games.won)
 
@@ -121,7 +161,17 @@ def main() -> int:
     pack_size = np.diff(picks_all.pack.indptr)
     print(f"Loaded models and {picks_all.n} val/test picks  [{time.time() - t0:.0f}s]")
 
-    out = {}
+    try:
+        from mtgdraft.carddb import ArenaCardDB
+        info = ArenaCardDB().by_name()
+    except FileNotFoundError:
+        info = None
+        print("Arena card database not found: skipping the deck-aware scorer and color fit.")
+
+    def deck(t, q):
+        return DeckAwareScorer(fm, card_names, info, temperature=t, replacement_quantile=q)
+
+    out, best_deck, best_wpa = {}, None, float("-inf")
     for split_name, split_id in (("val", 1), ("test", 2)):
         keep = np.flatnonzero((lab == split_id) & (pack_size > 1) & (picks_all.pick >= 0))
         from mtgdraft.model.drafts import PickData
@@ -138,6 +188,21 @@ def main() -> int:
         evaluate("fm value only", PickScorer(fm, card_names, 0.0), picks, strong, stage, res)
         for a in args.synergy:
             evaluate(f"fm + synergy x{a:g}", PickScorer(fm, card_names, a), picks, strong, stage, res)
+        if info is not None:
+            # Tune on validation (by wins/agree); on test, report only the chosen setting.
+            grid = [(t, q) for t in args.deck_temps for q in args.deck_quantiles] if split_name == "val" else [best_deck]
+            for t, q in grid:
+                r = evaluate(f"deck-aware t={t:g} q={q:g}", deck(t, q), picks, strong, stage, res)
+                if split_name == "val" and r["wins_per_agree"] > best_wpa:
+                    best_deck, best_wpa = (t, q), r["wins_per_agree"]
+            if args.fit_drafts:
+                rows = np.flatnonzero(lab == split_id)
+                fm_fit, human_fit = color_fit(PickScorer(fm, card_names, 1.0), picks_all, rows, card_names, info, args.fit_drafts)
+                dk_fit, _ = color_fit(deck(*best_deck), picks_all, rows, card_names, info, args.fit_drafts)
+                print(f"  color fit (share of nonland cards castable in best 2-color pair, {args.fit_drafts} drafts): "
+                      f"humans {human_fit:.0%} | fm + synergy {fm_fit:.0%} | deck-aware {dk_fit:.0%}", flush=True)
+                res.append({"scorer": "color_fit", "human": human_fit, "fm_synergy": fm_fit,
+                            "deck_aware": dk_fit, "deck_setting": best_deck, "n_drafts": args.fit_drafts})
         out[split_name] = res
 
     path = models / f"pick_eval.{args.set}.{args.event}.json"

@@ -69,12 +69,17 @@ def build_covariates(meta: pd.DataFrame) -> tuple[sp.csr_matrix, list[str]]:
         _one_hot(skill, "skill"),
         _one_hot(n_games.astype(int), "n_games"),
         _one_hot(meta["rank"].fillna("na"), "rank"),
-        _one_hot(meta["num_mulligans"].clip(upper=2), "mull"),
-        _one_hot(meta["opp_num_mulligans"].clip(upper=2), "opp_mull"),
     ]
-    on_play = sp.csr_matrix(meta["on_play"].astype(np.float32).to_numpy()[:, None])
-    mats = [p[0] for p in parts] + [on_play]
-    names = [n for p in parts for n in p[1]] + ["on_play"]
+    # Game-level controls exist only in game data (draft-derived decks don't have them).
+    if "num_mulligans" in meta:
+        parts.append(_one_hot(meta["num_mulligans"].clip(upper=2), "mull"))
+    if "opp_num_mulligans" in meta:
+        parts.append(_one_hot(meta["opp_num_mulligans"].clip(upper=2), "opp_mull"))
+    mats = [p[0] for p in parts]
+    names = [n for p in parts for n in p[1]]
+    if "on_play" in meta:
+        mats.append(sp.csr_matrix(meta["on_play"].astype(np.float32).to_numpy()[:, None]))
+        names.append("on_play")
     return sp.hstack(mats, format="csr", dtype=np.float32), names
 
 
@@ -149,3 +154,66 @@ def split_label(draft_id: np.ndarray, val_frac: float = 0.1, test_frac: float = 
     u = np.array([int(hashlib.md5(f"{salt}|{d}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
                   for d in draft_id])
     return np.where(u < test_frac, 2, np.where(u < test_frac + val_frac, 1, 0))
+
+
+# ---- decks rebuilt from draft data (for sets with no game data yet) ----------------
+DRAFT_META = ["draft_id", "draft_time", "rank", "event_match_wins", "event_match_losses",
+              "user_n_games_bucket", "user_game_win_rate_bucket"]
+
+
+def load_draft_decks(raw_path: str | Path, use_cache: bool = True) -> GameData:
+    """Approximate decks and results from 17Lands *draft* data.
+
+    A new set often has draft data before game data. Each draft's deck is the picks
+    the drafter mostly played: pick_maindeck_rate (the share of the drafter's builds
+    that played that pick) of at least 0.5. Using the rate itself as a fractional count
+    inflated the weights of rarely played cards, because tiny counts let the weight
+    grow without changing predictions. The draft's match record
+    becomes one row per match (won=1 for each win, 0 for each loss), so the rest of
+    the pipeline (training, metrics, split by draft) works unchanged. Basic lands are
+    not picks, so they are absent from these decks.
+    """
+    raw_path = Path(raw_path)
+    cache = _cache_path(raw_path)
+    cache = cache.with_name(cache.name.replace(".npz", ".decks_v2.npz"))
+    if use_cache and cache.exists():
+        return _load_cache(cache)
+    header = pd.read_csv(raw_path, nrows=0).columns
+    card_names = [c.removeprefix("pack_card_") for c in header if c.startswith("pack_card_")]
+    idx = {n: i for i, n in enumerate(card_names)}
+    df = pd.read_csv(raw_path, usecols=DRAFT_META + ["pick", "pick_maindeck_rate"])
+    df = df[df["pick"].isin(idx)]
+    meta = df.groupby("draft_id", sort=False)[DRAFT_META[1:]].first().reset_index()
+    meta = meta[(meta["event_match_wins"] + meta["event_match_losses"]) > 0].reset_index(drop=True)
+    row_of = {d: i for i, d in enumerate(meta["draft_id"])}
+    df = df[df["draft_id"].isin(row_of)]
+    df = df[df["pick_maindeck_rate"] >= 0.5]
+    decks = sp.csr_matrix((np.ones(len(df), np.float32),
+                           (df["draft_id"].map(row_of).to_numpy(), df["pick"].map(idx).to_numpy())),
+                          shape=(len(meta), len(card_names)))
+    decks.sum_duplicates()
+    wins = meta["event_match_wins"].to_numpy().astype(int)
+    losses = meta["event_match_losses"].to_numpy().astype(int)
+    rep = np.repeat(np.arange(len(meta)), wins + losses)
+    won = np.concatenate([np.r_[np.ones(w), np.zeros(l)] for w, l in zip(wins, losses)]).astype(np.float32)
+    m = meta.iloc[rep].reset_index(drop=True)
+    cov, cov_names = build_covariates(m)
+    data = GameData(cards=decks[rep], card_names=card_names, covariates=cov, covariate_names=cov_names,
+                    won=won, draft_id=m["draft_id"].astype(str).to_numpy(),
+                    draft_time=pd.to_datetime(m["draft_time"]).to_numpy())
+    if use_cache:
+        _save_cache(cache, data)
+    return data
+
+
+def load_deck_data(raw_dir: str | Path, set_code: str, event: str) -> tuple[GameData, str]:
+    """Game data if 17Lands has it for this set/event, else decks rebuilt from draft data."""
+    raw_dir = Path(raw_dir)
+    game = raw_dir / f"game_data_public.{set_code}.{event}.csv.gz"
+    if game.exists():
+        return load_games(game), "game"
+    draft = raw_dir / f"draft_data_public.{set_code}.{event}.csv.gz"
+    if draft.exists():
+        return load_draft_decks(draft), "draft"
+    raise FileNotFoundError(f"No 17Lands game or draft data for {set_code} {event} in {raw_dir}. "
+                            f"Run scripts/download_17lands.py --set {set_code} --event {event}.")

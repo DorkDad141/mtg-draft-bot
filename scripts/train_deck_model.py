@@ -30,7 +30,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from mtgdraft.model.baselines import card_logit_win_rates  # noqa: E402
 from mtgdraft.model.fm import FactorizationMachine, FMConfig  # noqa: E402
-from mtgdraft.model.games import load_games, split_by_draft  # noqa: E402
+from mtgdraft.model.games import load_deck_data, split_by_draft  # noqa: E402
 from mtgdraft.model.metrics import auc, log_loss, paired_diff  # noqa: E402
 
 
@@ -60,19 +60,20 @@ def main() -> int:
     ap.add_argument("--set", default="Cube_-_Powered", help="Set code as in the file name")
     ap.add_argument("--event", default="PremierDraft")
     ap.add_argument("--ks", type=int, nargs="+", default=[4, 8, 16])
-    ap.add_argument("--l2-v", type=float, nargs="+", default=[3e-4, 1e-3, 3e-3])
+    ap.add_argument("--l2-v", type=float, nargs="+", default=[1e-3, 3e-3, 1e-2, 3e-2])
     ap.add_argument("--l2-w", type=float, nargs="+", default=[1e-5, 1e-4, 1e-3])
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    raw = REPO_ROOT / "data" / "raw" / f"game_data_public.{args.set}.{args.event}.csv.gz"
-    if not raw.exists():
-        sys.exit(f"{raw} not found. Run scripts/download_17lands.py first.")
     t0 = time.time()
-    data = load_games(raw)
+    try:
+        data, source = load_deck_data(REPO_ROOT / "data" / "raw", args.set, args.event)
+    except FileNotFoundError as e:
+        sys.exit(str(e))
     tr_i, va_i, te_i = split_by_draft(data.draft_id)
     train, val, test = data.subset(tr_i), data.subset(va_i), data.subset(te_i)
-    print(f"{data.n_games} games, {len(data.card_names)} cards; train/val/test games "
+    unit = "games" if source == "game" else "matches (decks rebuilt from draft data)"
+    print(f"{data.n_games} {unit}, {len(data.card_names)} cards; train/val/test "
           f"{train.n_games}/{val.n_games}/{test.n_games} (split by draft)  [{time.time() - t0:.1f}s]")
     verbose = not args.quiet
 
@@ -129,7 +130,11 @@ def main() -> int:
         print(f"  {k:<28} {v:.5f}")
 
     out = REPO_ROOT / "data" / "models" / f"fm.{args.set}.{args.event}.npz"
-    fm.save(out, data.card_names, data.covariate_names, set=args.set, event=args.event,
+    # How many training decks played each card: scorers shrink values of rarely seen cards.
+    _, first = np.unique(train.draft_id, return_index=True)
+    card_decks = np.asarray((train.cards[first] > 0).sum(0)).ravel().astype(int).tolist()
+    fm.save(out, data.card_names, data.covariate_names, set=args.set, event=args.event, source=source,
+            card_decks=card_decks,
             test_results=results, trained_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     lr_model.save(out.with_name(f"logreg.{args.set}.{args.event}.npz"), data.card_names,
                   data.covariate_names, set=args.set, event=args.event)

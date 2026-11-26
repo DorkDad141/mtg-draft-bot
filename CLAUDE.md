@@ -19,3 +19,11 @@ to revisit later, and the data source details. Keep it up to date when decisions
 - Downloaded data goes in `data/`, which is git-ignored. The download script must be
   rerunnable so each set's data can be refreshed.
 - Credit 17Lands (CC BY 4.0) in the README.
+
+## Entry points
+- Live assistant: `scripts/draft_assistant.py --top N` (rehearse with `--sim-17lands SET --fake-screen`).
+- Step-by-step live test: `docs/TRK_TEST.md`.
+- Modules: reader `mtgdraft/reader/` (incl. log archive and simulated logs), card DB
+  `mtgdraft/carddb/`, ranking model `mtgdraft/model/` (deck-aware scorer is the default),
+  overlay `mtgdraft/overlay/`, glue `mtgdraft/assistant.py`.
+- Every Arena session's log is archived in `logs/archive/` (git-ignored).
