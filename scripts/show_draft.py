@@ -20,24 +20,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from mtgdraft.carddb import ArenaCardDB  # noqa: E402
-from mtgdraft.model.fm import FactorizationMachine  # noqa: E402
-from mtgdraft.model.scorer import PickScorer  # noqa: E402
+from mtgdraft.model.scorer import load_scorer as scorer_for  # noqa: E402
 from mtgdraft.reader import ArenaLogReader, DraftState, default_arena_log_path  # noqa: E402
 from mtgdraft.reader.arena_log import set_and_event  # noqa: E402
-
-_scorers: dict[tuple, PickScorer | None] = {}
-
-
-def scorer_for(set_code: str | None, event: str) -> PickScorer | None:
-    key = (set_code, event)
-    if key not in _scorers:
-        path = REPO_ROOT / "data" / "models" / f"fm.{set_code}.{event}.npz"
-        if set_code and path.exists():
-            fm, names = FactorizationMachine.load(path)
-            _scorers[key] = PickScorer(fm, names["cards"])
-        else:
-            _scorers[key] = None
-    return _scorers[key]
 
 
 def _fmt(name: str, score: float) -> str:
@@ -97,7 +82,8 @@ def main() -> int:
     db = ArenaCardDB()
 
     if args.live:
-        path = Path(args.logs[0]) if args.logs else default_arena_log_path()
+        sys.stdout.reconfigure(line_buffering=True)   # show each pack immediately, even when piped
+        path =Path(args.logs[0]) if args.logs else default_arena_log_path()
         print(f"Following {path} (Ctrl+C to stop)")
 
         def on_update(d: DraftState, kind: str) -> None:

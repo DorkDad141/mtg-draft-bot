@@ -59,6 +59,22 @@ database, and shows the scorer's top cards for every pack. A model for the
 draft's set must have been trained first (`train_deck_model.py --set SOS`).
 `--live` follows the running Arena log.
 
+## Simulating a live draft
+
+```
+.venv\Scripts\python scripts/simulate_live_log.py logs\Player-prev.log logs\Player.log --list
+.venv\Scripts\python scripts/simulate_live_log.py logs\Player-prev.log logs\Player.log --draft f283
+.venv\Scripts\python scripts/simulate_live_log.py logs\Player-prev.log logs\Player.log --draft 2165 --bot-picks
+```
+
+Replays a recorded draft into `data/sim/Player.log` in Arena's log format, one
+pack and pick at a time, while the live reader follows it. Each pack is shown
+with every card ranked by the current model, then the pick actually made and
+where the bot ranked it. `--bot-picks` lets the bot make picks the log doesn't
+have; `--delay` sets the pace; `--top N` shortens the lists. With `--no-watch` it
+only writes the file, so `show_draft.py --live data\sim\Player.log` in a second
+terminal sees it exactly as it would see Arena.
+
 ## Credits
 
 Draft and game data: [17Lands](https://www.17lands.com/public_datasets) public datasets,

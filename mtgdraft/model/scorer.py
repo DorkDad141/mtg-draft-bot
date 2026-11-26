@@ -16,6 +16,7 @@ deck from the pool and score cards against that instead.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import scipy.sparse as sp
@@ -69,6 +70,24 @@ class PickScorer:
                 s += self.synergy_weight * float((pool_vec @ self.fm.V) @ self.fm.V[i])
             out.append((name, s))
         return sorted(out, key=lambda t: -np.nan_to_num(t[1], nan=-1e9))
+
+
+MODELS_DIR = Path(__file__).resolve().parents[2] / "data" / "models"
+_cache: dict[tuple, "PickScorer | None"] = {}
+
+
+def load_scorer(set_code: str | None, event: str = "PremierDraft",
+                models_dir: Path = MODELS_DIR) -> "PickScorer | None":
+    """Load the trained FM for a set/event as a PickScorer, or None if there is no model."""
+    key = (set_code, event, str(models_dir))
+    if key not in _cache:
+        path = Path(models_dir) / f"fm.{set_code}.{event}.npz"
+        if set_code and path.exists():
+            fm, names = FactorizationMachine.load(path)
+            _cache[key] = PickScorer(fm, names["cards"])
+        else:
+            _cache[key] = None
+    return _cache[key]
 
 
 def linear_scorer(weights: np.ndarray, card_names: list[str]) -> PickScorer:

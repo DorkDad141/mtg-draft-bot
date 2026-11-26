@@ -134,6 +134,13 @@ Constraint: use as few paid drafts as possible.
      (-0.00173 +/- 0.00020, about 8.6 SE), a much clearer synergy gain than in the cube.
      The best l2_v sat at the edge of the grid (3e-3); try larger values.
    - The scorer now never recommends basic lands (they score NaN and rank last).
+   - `scripts/simulate_live_log.py` replays a recorded draft into data/sim/Player.log in
+     real Arena line format, while the live reader (`follow()`) ranks every pack. It is
+     the way to test the live path and the future overlay without paid drafts.
+     `--bot-picks` lets the bot draft packs whose picks are unknown (approximate,
+     because later packs still reflect the real picks). Tested in-process and with
+     `show_draft.py --live` as a separate process; both see every pack.
+   - Model loading is shared through `mtgdraft.model.scorer.load_scorer(set, event)`.
 5. Card database (Scryfall), then overlay.
 
 ## Deck model results (Powered Cube PremierDraft, 2026-11-26)
