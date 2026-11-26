@@ -101,12 +101,47 @@ Constraint: use as few paid drafts as possible.
    game files are downloaded locally (93 MB and 27 MB).
    Note: the API's "expansion" is the display name ("Powered Cube"), but file names use
    "Cube_-_Powered". The script accepts either.
-2. Load the game data into a sparse deck matrix and train the factorization machine. Report
-   held-out log-loss and AUC against simpler baselines (per-card win rates, logistic
-   regression with no pairwise terms).
+2. DONE (2026-11-26): deck win-rate model. Code: `mtgdraft/model/` (games.py loader,
+   fm.py factorization machine in numpy/scipy, metrics.py). Run
+   `python scripts/train_deck_model.py --set Cube_-_Powered` (about 1 minute on CPU for the
+   full grid). The best model is saved to data/models/. Results are in "Deck model results"
+   below.
+   Dependencies are in requirements.txt (numpy, scipy, pandas), installed in repo/.venv.
 3. Pick scorer and offline replay evaluation on 17Lands drafts.
 4. Player.log parser, tested on the user's cube logs. Handle the P1P1 gotcha below.
 5. Card database (Scryfall), then overlay.
+
+## Deck model results (Powered Cube PremierDraft, 2026-11-26)
+- Data: 266,117 games from 47,592 drafts, played 2025-10-30 to 2025-11-19, with 545 cards.
+  Split by draft into 80% train, 10% validation and 10% test. Features are main-deck copy
+  counts.
+- Controls (linear only): skill bucket, number-of-games bucket, rank, play/draw, own and
+  opponent mulligans. The skill bucket probably includes the game being predicted, which
+  leaks the result for players with few games, so skill is set to "unknown" below 50
+  games (SKILL_MIN_GAMES).
+- Held-out test results:
+
+  | model | log-loss | AUC |
+  |---|---|---|
+  | constant win rate | 0.68943 | 0.500 |
+  | controls only | 0.67010 | 0.611 |
+  | controls + average card win rate | 0.66673 | 0.620 |
+  | logistic regression (card weights) | 0.66356 | 0.628 |
+  | FM k=8, l2_v=3e-3 (card weights + synergy) | 0.66279 | 0.631 |
+
+  FM vs logistic regression: log-loss is 0.00077 lower, with a standard error of 0.00030
+  (clustered by draft), about 2.6 SE. Synergy adds a small but real signal. Validation
+  results for k from 4 to 16 are close together; regularization (l2_v) matters more than k.
+- Sanity check: the highest card weights are Time Walk, Ancestral Recall, Black Lotus and
+  Sol Ring. The strongest synergies form a Tolarian Academy / Mox Opal / Upheaval /
+  artifact cluster. The negative pairs are off-plan or off-color, such as Academy with
+  non-artifact cards, Plains + Spirebluff Canal, and Island + Ragavan. Individual pair
+  terms are small (about 0.01 logit), but they add up over the many pairs in a focused deck.
+- Win prediction is inherently noisy (AUC around 0.63). What matters for picks is the
+  ranking of cards for a given pool, which step 3 evaluates.
+- Ideas if needed later: a time-based split, deck color or archetype features, and
+  averaging several seeds. Shocklands, triomes and other dual lands have negative weights,
+  probably because greedy multicolor decks lose more. The pick scorer should account for this.
 
 ## Known gotchas
 - Premier/Traditional P1P1 may not appear in the log until after P1P2. Needs a workaround,
