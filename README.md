@@ -36,6 +36,29 @@ Trains a factorization machine that predicts a deck's win rate from its cards
 (card values plus pairwise synergy), compares it against simpler baselines on
 held-out drafts, and saves the best model to `data/models/`.
 
+## Evaluating picks
+
+```
+.venv\Scripts\python scripts/eval_picks.py --set Cube_-_Powered --event PremierDraft
+```
+
+Replays held-out 17Lands drafts and compares how each scorer ranks the packs the
+drafter saw: agreement with the human pick, and whether following the scorer is
+associated with more match wins.
+
+## Replaying Arena drafts
+
+```
+.venv\Scripts\python scripts/show_draft.py path\to\Player-prev.log path\to\Player.log
+.venv\Scripts\python scripts/show_draft.py --live
+```
+
+Reads Arena's Player.log (enable *Detailed Logs (Plugin Support)* in Arena's
+settings so picks are logged), maps card IDs to names with Arena's local card
+database, and shows the scorer's top cards for every pack. A model for the
+draft's set must have been trained first (`train_deck_model.py --set SOS`).
+`--live` follows the running Arena log.
+
 ## Credits
 
 Draft and game data: [17Lands](https://www.17lands.com/public_datasets) public datasets,

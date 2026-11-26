@@ -139,9 +139,13 @@ def _load_cache(path: Path) -> GameData:
 def split_by_draft(draft_id: np.ndarray, val_frac: float = 0.1, test_frac: float = 0.1,
                    salt: str = "mtg-draft-bot") -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Deterministic train/val/test split by draft, so one deck's games stay together."""
+    lab = split_label(draft_id, val_frac, test_frac, salt)
+    return np.flatnonzero(lab == 0), np.flatnonzero(lab == 1), np.flatnonzero(lab == 2)
+
+
+def split_label(draft_id: np.ndarray, val_frac: float = 0.1, test_frac: float = 0.1,
+                salt: str = "mtg-draft-bot") -> np.ndarray:
+    """0 = train, 1 = val, 2 = test. The same draft gets the same label in game and pick data."""
     u = np.array([int(hashlib.md5(f"{salt}|{d}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
                   for d in draft_id])
-    test = u < test_frac
-    val = (u >= test_frac) & (u < test_frac + val_frac)
-    train = ~(test | val)
-    return np.flatnonzero(train), np.flatnonzero(val), np.flatnonzero(test)
+    return np.where(u < test_frac, 2, np.where(u < test_frac + val_frac, 1, 0))

@@ -28,6 +28,7 @@ import scipy.sparse as sp
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from mtgdraft.model.baselines import card_logit_win_rates  # noqa: E402
 from mtgdraft.model.fm import FactorizationMachine, FMConfig  # noqa: E402
 from mtgdraft.model.games import load_games, split_by_draft  # noqa: E402
 from mtgdraft.model.metrics import auc, log_loss, paired_diff  # noqa: E402
@@ -35,13 +36,7 @@ from mtgdraft.model.metrics import auc, log_loss, paired_diff  # noqa: E402
 
 def card_wr_feature(train, *others, prior_games: float = 200.0):
     """Count-weighted mean logit of each card's smoothed main-deck win rate."""
-    X, y = train.cards, train.won
-    in_deck = (X > 0).astype(np.float32)
-    games = np.asarray(in_deck.sum(0)).ravel()
-    wins = in_deck.T @ y
-    p0 = y.mean()
-    wr = (wins + prior_games * p0) / (games + prior_games)
-    lwr = np.log(wr / (1 - wr)) - np.log(p0 / (1 - p0))
+    lwr = card_logit_win_rates(train.cards, train.won, prior_games)
 
     def feat(d):
         x = d.cards
@@ -136,6 +131,8 @@ def main() -> int:
     out = REPO_ROOT / "data" / "models" / f"fm.{args.set}.{args.event}.npz"
     fm.save(out, data.card_names, data.covariate_names, set=args.set, event=args.event,
             test_results=results, trained_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    lr_model.save(out.with_name(f"logreg.{args.set}.{args.event}.npz"), data.card_names,
+                  data.covariate_names, set=args.set, event=args.event)
     (out.with_suffix(".results.json")).write_text(json.dumps(
         {"results": results, "val": val_scores}, indent=2))
     print(f"\nSaved {out.relative_to(REPO_ROOT)}  [{time.time() - t0:.0f}s total]")
