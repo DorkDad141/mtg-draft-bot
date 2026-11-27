@@ -67,11 +67,13 @@ def load_set(set_code, event, info, train_every: int, n_eval: int):
         pools[name] = final_pools(sub, cards)
     all_ids = set().union(*[set(p) for p in pools.values()])
     out["humans"] = human_decks(raw, set_code, event, all_ids)
+    rec = tr.meta.groupby("draft_id").agg(w=("event_match_wins", "first"), l=("event_match_losses", "first"))
+    out["winners"] = set(rec.index[rec["w"] > rec["l"]])
     out["pools"] = pools
     return out
 
 
-def build(data, info, slack, splash_basics):
+def build(data, info, slack, splash_basics, winners_only=False):
     sc = ManaAwareScorer(data["fm"], data["cards"], info, slack=slack, splash_basics=splash_basics)
     lane_of = {lane: i for i, lane in enumerate(sc.lanes_def)}
     sets = {}
@@ -79,6 +81,8 @@ def build(data, info, slack, splash_basics):
         X, y, keys = [], [], []
         for d, pool in pools.items():
             if d not in data["humans"].index:
+                continue
+            if winners_only and split == "train" and d not in data["winners"]:
                 continue
             m, s = data["humans"].loc[d, "main"], data["humans"].loc[d, "splash"]
             li = lane_of.get((m, s)) if len(s) <= 1 else None
@@ -137,6 +141,9 @@ def main() -> int:
     ap.add_argument("--eval-drafts", type=int, default=1500)
     ap.add_argument("--slack", type=float, nargs="+", default=[1, 2])
     ap.add_argument("--splash-basics", type=int, nargs="+", default=[2, 3])
+    ap.add_argument("--winners", action="store_true",
+                    help="Fit on decks with a winning match record only (learn what winners build)")
+    ap.add_argument("--out", default="lane_model.json", help="File name in data/models/")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -146,7 +153,7 @@ def main() -> int:
           f"[{time.time() - t0:.0f}s]", flush=True)
     best = None
     for slack, sb in itertools.product(args.slack, args.splash_basics):
-        built = {s: build(d, info, slack, sb) for s, d in data.items()}
+        built = {s: build(d, info, slack, sb, args.winners) for s, d in data.items()}
         n_min = min(len(b[1]["train"][1]) for b in built.values())
         beta = fit([b[1]["train"][0][:n_min] for b in built.values()], [b[1]["train"][1][:n_min] for b in built.values()])
         val_ll = np.mean([-nll(beta, *b[1]["val"][:2])[0] for b in built.values()])
@@ -164,8 +171,9 @@ def main() -> int:
         print(f"  {s} test: {txt}")
         metrics[s] = txt
     out = {"features": LANE_FEATURES, "beta": [float(b) for b in beta], "slack": slack, "splash_basics": sb,
-           "trained_on": args.sets, "test": metrics, "fitted": time.strftime("%Y-%m-%d")}
-    path = REPO_ROOT / "data" / "models" / "lane_model.json"
+           "trained_on": args.sets, "winners_only": args.winners, "test": metrics,
+           "fitted": time.strftime("%Y-%m-%d")}
+    path = REPO_ROOT / "data" / "models" / args.out
     path.write_text(json.dumps(out, indent=2))
     print(f"Saved {path.relative_to(REPO_ROOT)}  [{time.time() - t0:.0f}s]")
     return 0

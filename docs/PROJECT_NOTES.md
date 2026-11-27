@@ -328,6 +328,17 @@ whose card list will change; the live test is TRK).
   mana value is +0.28 SD for 1-drops and -0.44 SD for 6+; in TRK it is flat.
 - Quick/Traditional drafts use the set's Premier Draft model; lane_model.json is shared.
 
+### Do winners splash differently? (2026-11-27)
+- 17Lands deck shapes by match wins: winners build FEWER colors. Cube, 0-2 vs 7 wins:
+  2-color 17% vs 26%, 3+splash 17% vs 10%; 2+splash ~45% throughout. Match win rate
+  by shape (cube): 2-color 51.6%, 2+splash 48.0%, 3 45.0%, 3+splash 43.3%. SOS: 2-color
+  48% -> 58% from 0-2 to 7 wins. (Correlational: weaker pools/players may go wider.)
+- Lane model refit on winning-record decks only (fit_lane_model.py --winners --out
+  lane_model_winners.json): weights almost identical to the all-decks model, so given a
+  pool, winners choose colors the same way; no per-format splash setting needed. Kept
+  the all-decks lane_model.json. load_scorer kind "mana@<file>" loads another lane model.
+- TRK game data still not published (checked 2026-11-27); TRK draft data already current.
+
 ### Bot decks vs human decks (2026-11-27, scripts/compare_decks.py)
 Same independent judge, castability-adjusted, neutral controls. Human drafts from the
 training split (never seen by the judge); bot pools from 50 simulated pods (400 decks

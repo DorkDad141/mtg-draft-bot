@@ -122,10 +122,11 @@ def load_scorer(set_code: str | None, event: str = "PremierDraft",
         if set_code and path.exists():
             fm, names = FactorizationMachine.load(path)
             shrink_by_evidence(fm, names.get("meta", {}).get("card_decks"))
-            if card_info is not None and kind == "mana":
+            if card_info is not None and kind.startswith("mana"):
                 import json
                 from .mana_scorer import ManaAwareScorer
-                lane_path = Path(models_dir) / "lane_model.json"
+                # "mana" uses lane_model.json; "mana@<file>" another lane model (for A/B tests).
+                lane_path = Path(models_dir) / (kind.split("@", 1)[1] if "@" in kind else "lane_model.json")
                 lm = json.loads(lane_path.read_text()) if lane_path.exists() else {}
                 _cache[key] = ManaAwareScorer(fm, names["cards"], card_info, temperature=MANA_TEMPERATURE,
                                               replacement_quantile=MANA_REPLACEMENT_QUANTILE,
