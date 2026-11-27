@@ -6,7 +6,7 @@ Arena's card database, so it works for any set and for cube lists that change.
   pips(card)       colored mana symbols in the cost: single-color pips per color, and
                    hybrid pips ({W/U}) as color pairs. Phyrexian ({U/P}) and twobrid
                    ({2/G}) symbols can be paid without the color, so they are ignored.
-  produces(card)   colors the card can make: lands' own colors, "Add {U}" / "Add one
+  produces(card)   colors the card can make (quoted token text ignored): lands' own colors, "Add {U}" / "Add one
                    mana of any color" abilities, and fetches ("Search your library for
                    an Island or Swamp card", "a basic land card" = any color). A nonland
                    card only counts for colors it doesn't itself need (Llanowar Elves is
@@ -63,8 +63,13 @@ def produces(card) -> set[str]:
         return set()
     out: set[str] = set()
     land = "Land" in card.types
-    text = card.text or ""
-    if land:
+    # Text in quotes describes a token or a granted ability ("create a Planet token with
+    # '{T}: Add one mana of any color.'"), not this card's own mana.
+    text = re.sub(r'"[^"]*"', "", card.text or "")
+    if land and not _ADD.search(text) and not _SEARCH.search(text):
+        # No mana ability in the text (basic lands): their color identity is what they make.
+        # Otherwise identity also counts colors in activation costs ({3}{B}: ...), so the
+        # text decides.
         out |= set(card.color_identity)
     for clause in _ADD.findall(text):
         if "commander" in clause:
@@ -77,8 +82,6 @@ def produces(card) -> set[str]:
         if "basic land" in q:
             out |= set(COLORS)
         out |= {c for t, c in BASIC_TYPES.items() if t in q}
-    if land and out and set(card.color_identity) - out and not _ADD.search(text):
-        out |= set(card.color_identity)
     if not land:
         need, hyb = pips(card)
         out -= {COLORS[i] for i in range(5) if need[i]}

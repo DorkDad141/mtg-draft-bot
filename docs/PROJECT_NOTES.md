@@ -356,6 +356,39 @@ whose card list will change; the live test is TRK).
   mana value is +0.28 SD for 1-drops and -0.44 SD for 6+; in TRK it is flat.
 - Quick/Traditional drafts use the set's Premier Draft model; lane_model.json is shared.
 
+### Land fixes and one deck-building logic (2026-11-27, after the live test)
+Found by the user in the proposed deck (Andoria in a W/U deck, Artificial Anomaly
+without black):
+- mana.produces read "Add one mana of any color" inside QUOTED token text (the Anomaly
+  lands' sacrifice makes a Planet token) as the land's own mana: the Anomalies were
+  5-color fixers to the scorer. Quoted text is now ignored. Lands also no longer take
+  their color identity when they have mana text (identity includes activation-cost
+  colors: Artificial Anomaly's {3}{B}). Affected 11 TRK, 2 SOS, 4 cube cards.
+- One land rule, shared by pick ranking and deck building (ManaAwareScorer._mana_cards):
+  a nonbasic land is played if it makes 2+ of the deck's colors (dual, tri-land, fetch);
+  a land making just one deck color is a worse basic and is left out. Utility lands
+  (own value beats a basic) only when the model learned from real decklists with
+  basics (17Lands game data: cube, SOS); TRK decks rebuilt from draft data have no
+  basics, so land values can't be compared and that rule is off.
+- The proposed deck is now built by the drafting scorer itself
+  (ManaAwareScorer.build_deck: its likeliest lane, best 23 by castability-weighted
+  value, its land rule and mana base). Rated by the independent judge. The neutral
+  builder stays only for the A/B test (both scorers' pools), with the same land rule.
+- Lane model refit: test main colors cube 68.2% (count baseline 57.8%), SOS 85.0%.
+- Rerun, held-out test, mana-aware: top-1 TRK .367, SOS .506, cube .364 (deck-aware
+  .329/.418/.292); wins/agree 2.52/1.65/3.17 (+/- 0.8; deck-aware 2.96/2.87/4.05).
+  A/B (100 pods, independent judge), A - B: TRK free +1.27 +/- 0.49, human-style +2.44
+  +/- 0.50; cube +3.06 +/- 0.44, +3.80 +/- 0.45 (before the fixes: TRK +2.8/+4.5, cube
+  +1.6/+2.5; TRK's earlier margin was partly the bogus fixers).
+- Judged win rate, decks built by the scorer (compare_decks.py "scorer build" column):
+  TRK bot new 31.2%, old 29.7%, humans 32.2% (winning 32.2%, 7 wins 33.7%); cube bot
+  new 48.1%, old 46.5%, humans 49.7% (winning 51.0%, 7 wins 52.1%). Scorer-built human
+  decks rate close to the decks humans registered (TRK 30.9%, cube 47.2%), unlike the
+  neutral "free" build, which picks the judge's favourite build and runs ~8 pts higher.
+- The user's TRK Quick Draft deck: W/U, 40.5% vs 32.2% average human (80th
+  percentile); the earlier 59.0% (94th) was inflated by the bogus fixers and the free build.
+- Still open: in TRK the bot ends 3-color 50% of the time (humans 26%).
+
 ### Do winners splash differently? (2026-11-27)
 - 17Lands deck shapes by match wins: winners build FEWER colors. Cube, 0-2 vs 7 wins:
   2-color 17% vs 26%, 3+splash 17% vs 10%; 2+splash ~45% throughout. Match win rate

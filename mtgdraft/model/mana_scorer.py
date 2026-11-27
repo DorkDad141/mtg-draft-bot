@@ -4,9 +4,12 @@ Lanes are the decks the pool might become: the 10 two-color pairs, the 10 three-
 triples, and each pair with a splash of one of the other three colors (50 lanes).
 
 For each lane, a 17-land mana base is built from the pool:
-  * every nonbasic land in the pool that makes a lane color, and every nonland mana
-    source (Signets, Moxen, dorks, ramp) whose cost fits the lane, counts as a source
-    of each lane color it makes;
+  * a nonbasic land is played if it makes at least two of the lane's colors (a dual,
+    tri-land or fetch for this deck), or if its own value in the lane beats a basic land's
+    (utility lands; only when the model learned from decklists that include basics, i.e.
+    17Lands game data, since draft-derived decks have no basics to compare with); a land
+    making just one lane color is only a worse basic, so it is left out. Nonland mana sources (Signets, Moxen, dorks, ramp) whose cost fits the lane
+    also count. Each counts as a source of every lane color it makes;
   * the remaining basics go first to the splash color (up to `splash_basics`, minus
     the fixing the pool already has for it), then to the main colors in proportion
     to how many pips of each color the pool's lane cards need.
@@ -84,6 +87,8 @@ class ManaAwareScorer:
     tiebreak: float = 0.005
     triples: bool = True
     lane_beta: object = None           # lane-choice model weights (LANE_FEATURES); None: softmax of strength
+    land_utility: bool = True          # play lands for their own value (only meaningful when the model
+                                       # learned from decklists that include basic lands: game data)
     strength_mode: str = "deck"        # "deck": value of the best 23 over a shared baseline; "above": over each lane's bar
     splashes: bool = True
     never_pick: frozenset = BASIC_LANDS
@@ -153,16 +158,9 @@ class ManaAwareScorer:
     # ---- mana base ---------------------------------------------------------------
     def _sources(self, pool_idx: np.ndarray, extra: int | None = None) -> np.ndarray:
         """(L, 5) colored sources of each lane's mana base built from the pool (+ an extra card)."""
-        m = self.mana
         idx = pool_idx if extra is None else np.append(pool_idx, extra)
         L = len(self.lanes_def)
-        prod = m.produces[idx]                                   # (m, 5)
-        land = self._is_land[idx] & ~self._is_basic[idx]
-        lane_prod = prod[None, :, :] & self._lane_mask[:, None, :]          # (L, m, 5)
-        useful = lane_prod.any(2)                                            # (L, m)
-        fits = ~(self._cmask[idx][None, :, :] & ~self._lane_mask[:, None, :]).any(2)
-        use_land = useful & land[None, :]
-        use_rock = useful & ~land[None, :] & fits & self._spell[idx][None, :]
+        use_land, use_rock, lane_prod = self._mana_cards(idx)
         src = (lane_prod & (use_land | use_rock)[:, :, None]).sum(1).astype(float)   # (L, 5)
         n_lands = np.minimum(use_land.sum(1), self.lands - 2)
         basics = (self.lands - n_lands).astype(float)
@@ -177,6 +175,59 @@ class ManaAwareScorer:
         demand = (self.mana.single[idx][spells].sum(0)[None, :] + 1.0) * self._main_mask       # (L, 5)
         src += rest[:, None] * demand / demand.sum(1, keepdims=True)
         return src
+
+    def _mana_cards(self, idx: np.ndarray):
+        """Which pool cards each lane's deck plays for mana: (use_land, use_rock, lane_prod).
+
+        A nonbasic land is played if it makes 2+ of the lane's colors, or if its own value in
+        the lane beats a basic (utility lands). This is the one land rule, used both when
+        ranking picks and when building the deck."""
+        prod = self.mana.produces[idx]                                       # (m, 5)
+        land = self._is_land[idx] & ~self._is_basic[idx]
+        lane_prod = prod[None, :, :] & self._lane_mask[:, None, :]          # (L, m, 5)
+        n_cols = lane_prod.sum(2)                                            # (L, m)
+        fits = ~(self._cmask[idx][None, :, :] & ~self._lane_mask[:, None, :]).any(2)
+        utility = (self._val[:, idx] > self._land_thr[:, None]) if self.land_utility else np.zeros((len(self.lanes_def), len(idx)), bool)
+        use_land = land[None, :] & ((n_cols >= 2) | utility)
+        use_rock = (n_cols >= 1) & ~land[None, :] & fits & self._spell[idx][None, :]
+        return use_land, use_rock, lane_prod
+
+    def build_deck(self, pool: list[str], lane: tuple[str, str] | None = None) -> dict:
+        """The deck this scorer projects for the pool: the lane it rates most likely (or the
+        given one), the best 23 spells by castability-weighted value, the nonbasic lands its
+        land rule plays, and basics by the same mana base (splash first, then pip demand)."""
+        pool_idx = np.array([self._idx[n] for n in pool if n in self._idx], dtype=int)
+        src = self._sources(pool_idx)
+        deck = self._deck(pool_idx, src)
+        strength, _, _, spells, chosen, p = deck
+        if lane is not None:
+            li = self.lanes_def.index(lane)
+        else:
+            feats = self.lane_features(pool_idx, src, deck) if self.lane_beta is not None else None
+            li = int(np.argmax(self._weights(strength, feats)))
+        picked = spells[chosen[li]] if len(spells) else np.zeros(0, int)
+        p_of = dict(zip(spells.tolist(), p[li].tolist())) if len(spells) else {}
+        use_land, _, _ = self._mana_cards(pool_idx)
+        lands = list(pool_idx[use_land[li]])[: self.lands - 2]
+        n_basic = self.lands - len(lands)
+        # Basics: the same split as the mana base (splash color first, then pip demand).
+        have = self.mana.produces[lands].astype(float).sum(0) if lands else np.zeros(5)
+        alloc = np.zeros(5)
+        sp = self._splash[li]
+        if sp >= 0:
+            alloc[sp] = min(max(self.splash_basics - have[sp], 0), n_basic)
+        demand = (self.mana.single[picked].sum(0) + 1.0) * self._main_mask[li] if len(picked) else \
+            self._main_mask[li].astype(float)
+        rest = n_basic - alloc.sum()
+        share = rest * demand / demand.sum()
+        alloc += np.floor(share)
+        for x in np.argsort(-(share - np.floor(share)))[: int(round(n_basic - alloc.sum()))]:
+            alloc[x] += 1
+        basics = {BASIC_OF[COLORS[x]]: int(alloc[x]) for x in range(5) if alloc[x] > 0}
+        return {"lane": self.lanes_def[li], "lane_name": lane_name(*self.lanes_def[li]),
+                "spells": [self.card_names[i] for i in picked],
+                "castable": [float(p_of.get(int(i), 1.0)) for i in picked],
+                "lands": [self.card_names[i] for i in lands], "basics": basics}
 
     def _deck(self, pool_idx: np.ndarray, src: np.ndarray):
         """Per lane: strength, threshold, synergy sum of the projected deck, and its cards."""

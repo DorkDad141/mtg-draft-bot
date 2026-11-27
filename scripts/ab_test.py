@@ -121,7 +121,9 @@ class DeckBuilder:
                 chosen.append(k)
                 vsum += self.V[spells[k]]
             lane_cols = ms._lane_mask[li]
-            lands = [i for i in nb_lands if (ms.mana.produces[i] & lane_cols).any()][:8]
+            # Same land rule as the scorer: a nonbasic land is played if it makes 2+ of the
+            # deck's colors (a single-color nonbasic is only a worse basic).
+            lands = [i for i in nb_lands if (ms.mana.produces[i] & lane_cols).sum() >= 2][:8]
             n_basic = 17 - len(lands)
             demand = np.zeros(5)
             for j in chosen:
@@ -150,6 +152,27 @@ class DeckBuilder:
             out[mode] = {"lane": ms.lanes_def[li], "deck": X[best], "mean_p": mean_p, "castable": n_castable,
                          "penalty": penalty, "logit": float(logit[best])}
         return out
+
+
+def rate_deck(builder: "DeckBuilder", spells: list[str], castable: list[float], lands: list[str],
+              basics: dict) -> float:
+    """Judge logit of a given 40-card deck (e.g. one the scorer built), castability-adjusted
+    the same way as DeckBuilder.build: each spell's uncastable share is a dead card."""
+    idx = {n: i for i, n in enumerate(builder.names)}
+    X = sp.lil_matrix((1, len(builder.names)), dtype=np.float32)
+    penalty = 0.0
+    for n, p in zip(spells, castable):
+        if n in idx:
+            X[0, idx[n]] += 1.0
+            penalty += (1 - p) * (builder.w[idx[n]] - builder.dead)
+    for n in lands:
+        if n in idx:
+            X[0, idx[n]] += 1.0
+    for n, c in basics.items():
+        if n in idx:
+            X[0, idx[n]] += float(c)
+    logit = float(builder.judge.logit(X.tocsr(), sp.csr_matrix((1, builder.n_cov), dtype=np.float32))[0])
+    return logit - penalty
 
 
 def deck_logit(fm, X, n_cov):

@@ -131,7 +131,8 @@ def load_scorer(set_code: str | None, event: str = "PremierDraft",
                 _cache[key] = ManaAwareScorer(fm, names["cards"], card_info, temperature=MANA_TEMPERATURE,
                                               replacement_quantile=MANA_REPLACEMENT_QUANTILE,
                                               lane_beta=lm.get("beta"), slack=lm.get("slack", 2),
-                                              splash_basics=lm.get("splash_basics", 2))
+                                              splash_basics=lm.get("splash_basics", 2),
+                                              land_utility=names.get("meta", {}).get("source", "game") == "game")
             elif card_info is not None:
                 from .deck_scorer import DeckAwareScorer
                 _cache[key] = DeckAwareScorer(fm, names["cards"], card_info)

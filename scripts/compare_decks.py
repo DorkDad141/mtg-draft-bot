@@ -37,7 +37,7 @@ from mtgdraft.carddb import ArenaCardDB  # noqa: E402
 from mtgdraft.model.drafts import load_picks  # noqa: E402
 from mtgdraft.model.games import load_deck_data, split_label  # noqa: E402
 from mtgdraft.model.scorer import load_scorer  # noqa: E402
-from scripts.ab_test import MODELS, DeckBuilder, opening_packs, run_pod, train_judge  # noqa: E402
+from scripts.ab_test import MODELS, DeckBuilder, opening_packs, rate_deck, run_pod, train_judge  # noqa: E402
 from scripts.eval_mana import final_pools  # noqa: E402
 
 
@@ -104,7 +104,9 @@ def main() -> int:
             pools = run_pod(p24, [A if a == "new" else B for a in arms])
             for arm, pool in zip(arms, pools):
                 b = builder.build(pool)
-                bot[arm].append((sig(b["free"]["logit"]), sig(b["human"]["logit"]), b["free"]["mean_p"]))
+                sd = A.build_deck(pool)       # the deck the drafting scorer itself would build
+                bot[arm].append((sig(b["free"]["logit"]), sig(b["human"]["logit"]), b["free"]["mean_p"],
+                                 sig(rate_deck(builder, sd["spells"], sd["castable"], sd["lands"], sd["basics"]))))
     print(f"{args.set}: simulated {args.pods} pods x 2 seatings  [{time.time() - t0:.0f}s]", flush=True)
 
     # Humans (training-split drafts: never seen by the judge)
@@ -123,33 +125,37 @@ def main() -> int:
     human = []
     for d in ids:
         b = builder.build(pools[d])
+        sd = A.build_deck(pools[d])
         actual = judge_actual(builder, data.cards[first[d]]) if d in first else (np.nan, np.nan)
         human.append((d, int(wins.loc[d, "w"]), int(wins.loc[d, "l"]), sig(b["free"]["logit"]),
-                      sig(b["human"]["logit"]), b["free"]["mean_p"], sig(actual[0]), actual[1]))
+                      sig(b["human"]["logit"]), b["free"]["mean_p"], sig(actual[0]), actual[1],
+                      sig(rate_deck(builder, sd["spells"], sd["castable"], sd["lands"], sd["basics"]))))
     print(f"rated {len(human)} human drafts ({source} decks)  [{time.time() - t0:.0f}s]\n", flush=True)
 
-    H = np.array([h[1:] for h in human], dtype=float)     # w, l, free, human-style, castab, actual, actual castab
-    def line(label, free, hs, cast, actual=None, actual_cast=None, n=None):
+    H = np.array([h[1:] for h in human], dtype=float)     # w, l, free, human-style, castab, actual, actual castab, scorer
+    def line(label, scorer_built, free, hs, cast, actual=None, actual_cast=None, n=None):
         a = f"{100 * np.nanmean(actual):5.1f}%  ({np.nanmean(actual_cast):.2f})" if actual is not None else "    -          "
-        print(f"  {label:<34} {100 * np.mean(free):5.1f}%   {100 * np.mean(hs):5.1f}%   ({np.mean(cast):.2f})   {a}   n={n}")
-        rows[label] = {"free": float(np.mean(free)), "human_style": float(np.mean(hs)), "castability": float(np.mean(cast)),
+        print(f"  {label:<34} {100 * np.mean(scorer_built):6.1f}%  {100 * np.mean(free):5.1f}%   {100 * np.mean(hs):5.1f}%   "
+              f"({np.mean(cast):.2f})   {a}   n={n}")
+        rows[label] = {"scorer_built": float(np.mean(scorer_built)), "free": float(np.mean(free)),
+                       "human_style": float(np.mean(hs)), "castability": float(np.mean(cast)),
                        "as_played": None if actual is None else float(np.nanmean(actual)), "n": n}
 
-    print(f"  {'':<34} {'built by our builder':<29}  {'as played':<16}")
-    print(f"  {'judged win rate':<34} {'free':>6}   {'human-style':>10} (castab.)  {'':>6}  (castab.)")
+    print(f"  {'':<34} {'scorer':>7}  {'neutral builder':<27}  {'as played':<16}")
+    print(f"  {'judged win rate':<34} {'build':>7}  {'free':>6}   {'human-style':>10} (castab.)  {'':>6}  (castab.)")
     for arm in ("new", "old"):
         x = np.array(bot[arm])
-        line(f"bot, {arm} scorer", x[:, 0], x[:, 1], x[:, 2], n=len(x))
+        line(f"bot, {arm} scorer", x[:, 3], x[:, 0], x[:, 1], x[:, 2], n=len(x))
     groups = [("humans, all", np.ones(len(H), bool)),
               ("humans, winning record (W > L)", H[:, 0] > H[:, 1]),
               ("humans, 0-2 wins", H[:, 0] <= 2), ("humans, 3-4 wins", (H[:, 0] >= 3) & (H[:, 0] <= 4)),
               ("humans, 5-6 wins", (H[:, 0] >= 5) & (H[:, 0] <= 6)), ("humans, 7 wins (trophy)", H[:, 0] >= 7)]
     for label, m in groups:
         if m.sum():
-            line(label, H[m, 2], H[m, 3], H[m, 4], H[m, 5], H[m, 6], n=int(m.sum()))
+            line(label, H[m, 7], H[m, 2], H[m, 3], H[m, 4], H[m, 5], H[m, 6], n=int(m.sum()))
     # Per-draft human ratings, so a single deck can be placed among them (propose_deck.py).
-    rows["human_decks"] = [{"wins": int(h[0]), "losses": int(h[1]), "free": float(h[2]), "human_style": float(h[3])}
-                           for h in H]
+    rows["human_decks"] = [{"wins": int(h[0]), "losses": int(h[1]), "free": float(h[2]), "human_style": float(h[3]),
+                            "scorer_built": float(h[7])} for h in H]
     out = MODELS / f"compare_decks.{args.set}.{args.event}.json"
     out.write_text(json.dumps(rows, indent=2))
     print(f"\nSaved {out.relative_to(REPO_ROOT)}  [{time.time() - t0:.0f}s]")
