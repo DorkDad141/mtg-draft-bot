@@ -147,6 +147,9 @@ def main() -> int:
     for label, m in groups:
         if m.sum():
             line(label, H[m, 2], H[m, 3], H[m, 4], H[m, 5], H[m, 6], n=int(m.sum()))
+    # Per-draft human ratings, so a single deck can be placed among them (propose_deck.py).
+    rows["human_decks"] = [{"wins": int(h[0]), "losses": int(h[1]), "free": float(h[2]), "human_style": float(h[3])}
+                           for h in H]
     out = MODELS / f"compare_decks.{args.set}.{args.event}.json"
     out.write_text(json.dumps(rows, indent=2))
     print(f"\nSaved {out.relative_to(REPO_ROOT)}  [{time.time() - t0:.0f}s]")
