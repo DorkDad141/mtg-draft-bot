@@ -16,8 +16,10 @@ All methods are thread-safe: other threads post updates, the Tk main loop applie
 from __future__ import annotations
 
 import ctypes
+import os
 import queue
 import sys
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 
@@ -50,6 +52,8 @@ class OverlayUI:
     def __init__(self, top_n: int, blackout: bool = True, opacity: float = 1.0,
                  exclude_from_capture: bool = True, title: str = "Draft assistant"):
         self.top_n = top_n
+        self.opacity = opacity
+        self.advisor_rect = None     # screen box of the advisor panel (kept uncovered), for recordings
         self.q: queue.Queue = queue.Queue()
         self.root = tk.Tk()
         self.root.title(title)
@@ -99,7 +103,7 @@ class OverlayUI:
                                  WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
                 if exclude_from_capture:
                     u.SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE)
-        self.root.after(50, self._poll)
+        self.root.after(20, self._poll)
 
     # ---- thread-safe API ------------------------------------------------------
     def show_pack(self, header: str, lanes: str, rows: list[tuple[str, str, bool]], status: str = "") -> None:
@@ -109,8 +113,15 @@ class OverlayUI:
     def set_status(self, text: str) -> None:
         self.q.put(("status", text))
 
-    def set_boxes(self, black: list[tuple[int, int, int, int]], badges: list[tuple[tuple, str]]) -> None:
-        self.q.put(("boxes", black, badges))
+    def set_boxes(self, black: list[tuple[int, int, int, int]], badges: list[tuple[tuple, str]],
+                  cover=None, holes: list[tuple[int, int, int, int]] = (), message: str = "") -> None:
+        """Draw black boxes and rank badges.
+
+        cover: a box (x0, y0, x1, y1), or "full" for the whole screen, painted black first;
+        holes: boxes cut back out of it (the top cards). The advisor panel is always left
+        uncovered. message: small text shown at the top-left of the cover.
+        """
+        self.q.put(("boxes", black, badges, cover, list(holes), message))
 
     def clear_boxes(self) -> None:
         self.q.put(("boxes", [], []))
@@ -121,7 +132,7 @@ class OverlayUI:
 
     def _do_fake(self, paths):
         from PIL import Image, ImageTk
-        if not hasattr(self, "fake"):
+        if not hasattr(self, "fake") or not self.fake.winfo_exists():   # first pack, or the window was closed
             self.fake = tk.Toplevel(self.root)
             self.fake.title("Fake Arena (test mode)")
             self.fake.configure(bg="#16120e")
@@ -162,13 +173,16 @@ class OverlayUI:
     def _poll(self) -> None:
         if self.closed:
             return
-        try:
-            while True:
+        while True:
+            try:
                 msg = self.q.get_nowait()
+            except queue.Empty:
+                break
+            try:
                 getattr(self, "_do_" + msg[0])(*msg[1:])
-        except queue.Empty:
-            pass
-        self.root.after(50, self._poll)
+            except tk.TclError as e:          # one bad update must not stop the UI loop
+                print(f"[ui] {msg[0]} update failed: {e}", flush=True)
+        self.root.after(20, self._poll)
 
     def _do_pack(self, header, lanes, rows, status):
         self.header.config(text=header)
@@ -199,14 +213,30 @@ class OverlayUI:
         u.SetWindowPos(_hwnd(self.overlay), wintypes.HWND(-1), 0, 0, 0, 0,
                        SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW)
 
-    def _do_boxes(self, black, badges):
+    def _do_boxes(self, black, badges, cover=None, holes=(), message=""):
         if self.overlay is None:
             return
         self._keep_on_top()
+        if os.environ.get("MTGDRAFT_TRACE"):
+            print(f"[trace {time.time():.3f}] overlay: cover={'full' if cover == 'full' else bool(cover)} "
+                  f"holes={len(holes)} boxes={len(black)}", flush=True)
         c = self.canvas
         c.delete("all")
+        if cover is not None:
+            x0, y0, x1, y1 = ((0, 0, self.overlay.winfo_width(), self.overlay.winfo_height())
+                              if cover == "full" else cover)
+            c.create_rectangle(x0, y0, x1, y1, fill="black", outline="")
+            if message:
+                c.create_text(x0 + 12, y0 + 10, text=message, fill="#7a7a80", anchor="nw", font=self.f_small)
         for x0, y0, x1, y1 in black:
             c.create_rectangle(x0, y0, x1, y1, fill="black", outline="")
+        for x0, y0, x1, y1 in holes:                 # the transparent key color cuts holes in the cover
+            c.create_rectangle(x0, y0, x1, y1, fill=KEY, outline="")
+        r = self.root
+        self.advisor_rect = (r.winfo_rootx() - 2, r.winfo_rooty() - 34, r.winfo_rootx() + r.winfo_width() + 2,
+                             r.winfo_rooty() + r.winfo_height() + 2)
+        if cover is not None:                        # never hide the advisor panel
+            c.create_rectangle(*self.advisor_rect, fill=KEY, outline="")
         for (x0, y0, x1, y1), text in badges:
             w = max(36, 9 * len(text))
             c.create_rectangle(x0 + 4, y0 + 4, x0 + 4 + w, y0 + 26, fill="#ffd75e", outline="")

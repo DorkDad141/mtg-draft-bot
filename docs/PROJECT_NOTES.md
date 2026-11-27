@@ -145,9 +145,38 @@ Constraint: use as few paid drafts as possible.
    (see "Live assistant and overlay" below, and docs/TRK_TEST.md for the test plan).
 6. Also done 2026-11-26: deck-aware scorer (now the default), TRK support with decks
    rebuilt from draft data, Arena log archiver, pick-by-pick HTML reports.
+7. Done 2026-11-27: the shield and session recording.
+   - Shield (default): the pack area turns black the moment a pick is logged, and on
+     each new pack before scoring; once the cards are found, holes are cut for the top
+     N only. The pack area is the union of card boxes found (6% margin), saved per
+     screen size in data/overlay_region.json, so only the very first pack on a new
+     screen size can show uncovered. Until the area is known, the whole screen is
+     covered for at most 3 s (the advisor panel is always left visible). If no card is
+     found for 3 s, the cover is lifted (Arena hidden). Rehearsal trace: 31/32 packs
+     were already covered when shown (cover up about 0.45 s before the pack); the miss
+     was the very first P1P1 (see the P1P1 caveat below). Holes appear about 0.8 s after the pack. `--no-shield`
+     restores per-card boxes. The log is polled every 50 ms.
+   - Quick/Traditional drafts fall back to the set's PremierDraft model (we only train
+     on Premier Draft data).
+   - Quick Draft logs: the reader also parses BotDraft_DraftStatus / BotDraft_DraftPick
+     (0-based numbers, response JSON on the marker line or the next, CardIds or older
+     CardId, DraftStatus "Completed" gives the pool). No draft ID, so bot drafts get
+     "<EventName>#<n>". Kinds are detected per line; no setting. Written from the known
+     format, verified on simulated logs (--sim-quick) only: check on the first live
+     Quick Draft. Premier parsing of the archived SOS logs is unchanged.
+   - P1P1 caveat: no earlier pick triggers the shield, so it rises when the pack is
+     logged. Rehearsals never save the pack area (a fake window's area was saved by
+     mistake once and deleted).
+   - Recorder (mtgdraft/recorder.py, on by default for live runs): captures/<date_time>/
+     with before/after JPEGs per pick (after = the drawn overlay rendered onto the same
+     frame, because the overlay is excluded from capture), events.jsonl (packs, rankings,
+     found boxes, picks, pool), session.json and Player.log.gz. These are labelled
+     real Arena screens for tuning the locator, and picks for the pick model.
+   - MTGDRAFT_TRACE=1 prints overlay/fake-screen timestamps for latency checks.
 
 ### Next steps (after the first live TRK test)
-- Review the live test: console output, data/reports/ report, logs/archive/.
+- Review the live test: console output, captures/<session>/ (before/after screenshots,
+  events.jsonl), data/reports/ report. Check the shield never showed an unranked pack.
 - If cards are missed on the real Arena screen: tune ART frame proportions in
   mtgdraft/overlay/locate.py for Arena's card rendering, or add more frame types.
 - Retrain TRK when 17Lands publishes TRK game data (the pipeline switches to game

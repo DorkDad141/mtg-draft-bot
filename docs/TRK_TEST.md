@@ -18,9 +18,11 @@ PowerShell. Steps 1–2 cost nothing; step 3 is the real (paid) draft.
 .venv\Scripts\python scripts/draft_assistant.py --top 3 --sim-17lands TRK --fake-screen
 ```
 A real held-out 17Lands TRK draft plays as a fake live log. A "Fake Arena" window
-shows each pack; the advisor panel (top right) ranks it; the 11 cards outside the
-top 3 get blacked out, and the top 3 get #1/#2/#3 badges. Close the advisor window
-to stop. `--sim-index 5` picks a different draft; `--sim-delay 5` slows it down.
+shows each pack; the advisor panel (top right) ranks it. The whole pack area goes
+black the moment a pick is made, so the next pack is never seen unranked; once its
+cards are found, only the top 3 are uncovered, with #1/#2/#3 badges. Close the advisor window
+to stop. `--sim-index 5` picks a different draft; `--sim-delay 5` slows it down;
+`--sim-quick` writes Quick Draft log lines instead of Premier Draft ones.
 
 ## 2. Check the overlay can draw over Arena (optional, no draft needed)
 Start Arena, leave it on any screen, then run the rehearsal again. The advisor and
@@ -34,18 +36,39 @@ Windowed or borderless (Options > Graphics), since exclusive fullscreen hides ov
    .venv\Scripts\python scripts/draft_assistant.py --top 3
    ```
    It archives earlier Arena logs, then follows the live log.
-3. Join TRK Premier Draft. On every pack the advisor shows the projected deck
+3. Join TRK Premier Draft or Quick Draft. Nothing needs to be set: the log reader
+   recognises either kind from Arena's log. Quick Draft uses the TRK Premier Draft
+   model (the decks are the same game). Quick Draft's log messages ("BotDraft_...")
+   were written from the known format and tested on simulated logs only, so this is
+   their first real test; the session recording keeps the log either way. On every pack the advisor shows the projected deck
    (most likely color pairs) and the ranked pack; on screen, all but the top 3
-   cards are blacked out. Clicks go straight through the overlay to Arena, so you
-   can still pick any card.
+   cards are blacked out. From each pick until the next pack is ranked, the whole
+   pack area stays black. Exception: the first pick of each draft (P1P1) has no
+   earlier pick to trigger the blackout, so it goes up when the pack appears in the
+   log; if Arena draws the pack before logging it, P1P1 may show for a moment. On
+   the first live draft the pack area isn't known yet, so P1P1 covers the whole
+   screen (advisor excepted) for up to 3 s until the cards are found; the area is
+   then saved in data/overlay_region.json (real drafts only, never rehearsals). Clicks go straight through the
+   overlay to Arena, so you can still pick any card.
 4. After the draft, close the advisor. Then make the pick-by-pick report:
    ```
    .venv\Scripts\python scripts/simulate_live_log.py logs\archive\*.gz --report --delay 0
    ```
    (or pass Arena's `Player.log` directly), and open `data\reports\draft_<id>.html`.
 
+## Recording (on by default for live drafts)
+Every live session is saved to `captures/<date_time>/` (git-ignored, since screenshots
+and logs show your account name), for future training:
+- `P1P01_before.jpg` ... the screen as Arena showed it, without the blackout;
+- `P1P01_after.jpg` ... the same frame with the overlay drawn on it (what you saw);
+- `events.jsonl`: each pack with its ranking and projected deck, the card boxes found
+  on screen, your pick, and the final pool;
+- `Player.log.gz`: the Arena log, copied when the draft completes and at exit.
+`--no-record` turns it off.
+
 Options: `--top N` (how many stay visible), `--opacity 0.85` (dim instead of solid
-black), `--no-overlay` (advisor panel only), `--console` (text only).
+black), `--no-overlay` (advisor panel only), `--console` (text only), `--no-shield` (only
+black out located cards, as before).
 
 ## If something goes wrong
 - **Advisor says "No model for ..."**: the event's set code wasn't TRK or the model

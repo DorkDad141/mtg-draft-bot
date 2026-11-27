@@ -27,6 +27,11 @@ except the top N, which get rank badges. Cards are found on screen by matching
 their art (Scryfall images, cached in `data/card_images/`), so it works at any
 resolution or scaling; the overlay is click-through and invisible to screenshots.
 If the draft's set has no model yet, it downloads 17Lands data and trains one.
+From each pick until the next pack is ranked, the whole pack area stays black, so
+you never see the next pack unranked. Premier, Traditional and Quick Draft logs are all
+recognised automatically; Quick/Traditional drafts use the set's Premier Draft model. Live sessions are recorded to `captures/<date_time>/`
+(screenshots before and after the blackout, rankings, picks and the Arena log) for
+future training; `--no-record` turns that off.
 
 Rehearse without Arena or a paid draft, using a real 17Lands draft as a fake live
 log and a fake Arena window:
@@ -35,7 +40,8 @@ log and a fake Arena window:
 .venv\Scripts\python scripts/draft_assistant.py --top 3 --sim-17lands TRK --fake-screen
 ```
 
-Options: `--no-overlay` (advisor only), `--console` (text only), `--opacity 0.85`.
+Options: `--no-overlay` (advisor only), `--console` (text only), `--opacity 0.85`,
+`--no-shield` (only black out the located non-top cards).
 
 ## Getting the data
 

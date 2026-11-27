@@ -12,7 +12,22 @@ Arena writes one line per client event. The lines used:
   Client.SceneChange ... "Entering table draft queue: SOS_Premier_Draft"
       Event hint when no course line is present.
 
-Pack and pick numbers are 1-based. The log is replaced each time Arena starts, and
+Quick Draft (drafting against bots) uses different messages, with no draft ID and
+0-based numbers; the response JSON may be on the marker line or the next line:
+
+  ==> BotDraft_DraftStatus {"id":..,"request":"{\"EventName\":\"QuickDraft_TRK_20261120\"}"}
+  <== BotDraft_DraftStatus(id) / <== BotDraft_DraftPick(id), then
+      {..,"Payload":"{\"EventName\":..,\"DraftStatus\":\"PickNext\",\"PackNumber\":0,
+       \"PickNumber\":0,\"DraftPack\":[\"95001\",..],\"PickedCards\":[..]}"}
+      The pack shown (or DraftStatus "Completed" with the whole pool in PickedCards).
+  ==> BotDraft_DraftPick {"id":..,"request":"{..,\"PickInfo\":{\"EventName\":..,
+      \"CardIds\":[\"95001\"],\"PackNumber\":0,\"PickNumber\":0}}"}  (older: "CardId")
+      The user's pick.
+
+Both kinds are recognised from the lines themselves; nothing needs to say in advance
+which kind of draft it is. A bot draft gets the ID "<EventName>#<n>".
+
+Pack and pick numbers are 1-based (bot-draft numbers are converted). The log is replaced each time Arena starts, and
 the previous session is kept as Player-prev.log.
 """
 
@@ -31,6 +46,7 @@ from .state import DraftState
 NOTIFY = "Draft.Notify "
 MAKE_PICK = "==> EventPlayerDraftMakePick "
 COMPLETE = "<== DraftCompleteDraft("
+BOT_STATUS, BOT_PICK = "BotDraft_DraftStatus", "BotDraft_DraftPick"
 QUEUE_RE = re.compile(r"Entering table draft queue: ([A-Za-z0-9_]+)")
 
 
@@ -49,6 +65,42 @@ def _json_after(line: str, marker: str) -> dict | None:
         return json.loads(line[i:])
     except json.JSONDecodeError:
         return None
+
+
+def _parse_nested(obj, depth: int = 0):
+    """Decode JSON objects stored as strings inside JSON (Arena's "Payload"/"request")."""
+    if depth > 4:
+        return obj
+    if isinstance(obj, str):
+        t = obj.strip()
+        if t[:1] in "{[":
+            try:
+                return _parse_nested(json.loads(t), depth + 1)
+            except json.JSONDecodeError:
+                return obj
+        return obj
+    if isinstance(obj, dict):
+        return {k: _parse_nested(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_parse_nested(v, depth + 1) for v in obj]
+    return obj
+
+
+def _find_key(obj, key: str):
+    """First dict (depth-first) that has `key`."""
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj
+        for v in obj.values():
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_key(v, key)
+            if r is not None:
+                return r
+    return None
 
 
 def _find_courses(obj) -> Iterator[dict]:
@@ -76,6 +128,9 @@ class ArenaLogReader:
         self._last_draft: str | None = None
         self._event_hint: str | None = None
         self._expect_complete = False
+        self._expect_bot = False          # a "<== BotDraft_..." marker without JSON: the next line has it
+        self._bot_count: Counter = Counter()
+        self._bot_current: dict[str, str] = {}   # event name -> current bot draft ID
 
     # ---- public -------------------------------------------------------------
     def feed(self, lines: Iterable[str]) -> None:
@@ -134,6 +189,14 @@ class ArenaLogReader:
             self.on_update(d, kind)
 
     def _line(self, line: str) -> None:
+        if self._expect_bot:
+            self._expect_bot = False
+            if line.lstrip().startswith("{"):
+                self._bot_response(_json_after(line, ""))
+                return
+        if BOT_STATUS in line or BOT_PICK in line:
+            self._bot_line(line)
+            return
         if NOTIFY in line:
             j = _json_after(line, NOTIFY)
             if j and "draftId" in j:
@@ -168,6 +231,69 @@ class ArenaLogReader:
                     self._course(course)
             self._expect_complete = False
 
+    # ---- Quick Draft (bot draft) -----------------------------------------------
+    def _bot_line(self, line: str) -> None:
+        marker = BOT_PICK if BOT_PICK in line else BOT_STATUS
+        if "<==" in line:
+            j = _json_after(line, marker + "(")
+            if j is None:
+                self._expect_bot = True      # the response JSON is on the next line
+            else:
+                self._bot_response(j)
+            return
+        j = _json_after(line, marker)
+        if j is None:
+            return
+        j = _parse_nested(j)
+        if marker == BOT_PICK:
+            info = _find_key(j, "PackNumber") or {}
+            ids = info.get("CardIds") or ([info["CardId"]] if info.get("CardId") is not None else [])
+            event = info.get("EventName") or (_find_key(j, "EventName") or {}).get("EventName")
+            if ids and "PickNumber" in info:
+                d = self._bot_draft(event)
+                d.picks[(int(info["PackNumber"]) + 1, int(info["PickNumber"]) + 1)] = int(ids[0])
+                self._emit(d, "pick")
+        elif "<==" not in line:
+            # The status request: a bot draft is starting or resuming. Note its event name.
+            event = (_find_key(j, "EventName") or {}).get("EventName")
+            if event:
+                self._event_hint = event
+
+    def _bot_draft(self, event: str | None, fresh: bool = False) -> DraftState:
+        event = event or self._event_hint or "BotDraft"
+        cur = self._bot_current.get(event)
+        if cur is None or (fresh and (self.drafts[cur].picks or self.drafts[cur].complete)):
+            self._bot_count[event] += 1
+            cur = self._bot_current[event] = f"{event}#{self._bot_count[event]}"
+        d = self._draft(cur)
+        d.event_name = event
+        return d
+
+    def _bot_response(self, j: dict | None) -> None:
+        if j is None:
+            return
+        p = _find_key(_parse_nested(j), "DraftStatus")
+        if p is None:
+            return
+        event = p.get("EventName")
+        picked = [int(x) for x in p.get("PickedCards") or []]
+        if str(p.get("DraftStatus")).lower() == "completed":
+            d = self._bot_draft(event)
+            if picked and d.final_pool != picked:
+                d.final_pool = picked
+                d.complete = True
+                self._emit(d, "pool")
+            return
+        pack = [int(x) for x in p.get("DraftPack") or []]
+        if not pack or "PackNumber" not in p:
+            return
+        slot = (int(p["PackNumber"]) + 1, int(p.get("PickNumber", 0)) + 1)
+        d = self._bot_draft(event, fresh=(slot == (1, 1) and not picked))
+        if d.packs.get(slot) == pack:
+            return                            # the same pack again (e.g. a status check)
+        d.packs[slot] = pack
+        self._emit(d, "pack")
+
     def _course(self, course: dict) -> None:
         pool = [int(x) for x in course.get("CardPool") or []]
         event = course.get("InternalEventName")
@@ -186,6 +312,8 @@ class ArenaLogReader:
                 best, best_score = d, score
         if best is None:
             return
+        if best.complete and best.final_pool == pool:
+            return                            # already reported (e.g. by the bot-draft response)
         best.final_pool = pool
         if event:
             best.event_name = event
