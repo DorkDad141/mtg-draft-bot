@@ -9,7 +9,13 @@ account name).
 
     python scripts/draft_viewer.py                    # newest draft in captures/
     python scripts/draft_viewer.py --draft QuickDraft_TRK
+    python scripts/draft_viewer.py --site ../draft-viewers   # also a shareable copy
 Keys: Left/Right = previous/next pick, T = blacked out / full screen.
+
+--site DIR writes a self-contained copy for a static web host (e.g. GitHub Pages):
+DIR/<draft>/index.html plus the screenshots (1280 px wide JPEGs), and a DIR/index.html
+listing every draft in DIR. Only the page and screenshots are copied, never the
+Arena log.
 """
 
 from __future__ import annotations
@@ -60,6 +66,7 @@ def load_sessions(draft_filter: str | None):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--draft", help="Part of the draft id (default: the most recent draft)")
+    ap.add_argument("--site", type=Path, help="Also write a shareable copy into this folder")
     args = ap.parse_args()
     drafts = load_sessions(args.draft)
     if not drafts:
@@ -105,7 +112,45 @@ def main() -> int:
                    .replace("__DATA__", json.dumps(data).replace("</", "<\\/")), encoding="utf-8")
     n_img = sum(1 for s in steps if s["img"])
     print(f"Wrote {out} ({len(steps)} picks, {n_img} with screenshots)")
+    if args.site:
+        write_site(args.site, safe, event, data)
     return 0
+
+
+def write_site(site: Path, safe: str, event: str, data: dict) -> None:
+    """Shareable copy: <site>/<draft>/index.html + img/*.jpg (1280 px), and <site>/index.html."""
+    import copy
+
+    import cv2
+    d = copy.deepcopy(data)
+    dest = site / safe
+    (dest / "img").mkdir(parents=True, exist_ok=True)
+    size = 0
+    for s in d["steps"]:
+        if not s["img"]:
+            continue
+        for kind in ("before", "after"):
+            src = CAPTURES / s["img"][kind]
+            name = f"{s['slot']}_{'full' if kind == 'before' else 'blacked'}.jpg"
+            im = cv2.imread(str(src))
+            if im is None:
+                continue
+            h, w = im.shape[:2]
+            if w > 1280:
+                im = cv2.resize(im, (1280, round(h * 1280 / w)), interpolation=cv2.INTER_AREA)
+            cv2.imwrite(str(dest / "img" / name), im, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            size += (dest / "img" / name).stat().st_size
+            s["img"][kind] = f"img/{name}"
+    (dest / "index.html").write_text(PAGE.replace("__TITLE__", html.escape(f"{event} - pick by pick"))
+                                     .replace("__DATA__", json.dumps(d).replace("</", "<\\/")), encoding="utf-8")
+    links = sorted(p.name for p in site.iterdir() if (p / "index.html").exists())
+    items = "\n".join(f'<li><a href="{html.escape(n)}/">{html.escape(n.replace("_", " "))}</a></li>' for n in links)
+    (site / "index.html").write_text(
+        "<!doctype html><meta charset='utf-8'><title>Draft viewers</title>"
+        "<style>body{font:15px/1.5 'Segoe UI',system-ui,sans-serif;background:#15161a;color:#e8e8ec;padding:24px}"
+        "a{color:#7fb2ff}</style><h1>Recorded drafts</h1><ul>" + items + "</ul>", encoding="utf-8")
+    (site / ".nojekyll").write_text("")
+    print(f"Wrote shareable copy to {dest} ({size / 1e6:.1f} MB of screenshots) and {site / 'index.html'}")
 
 
 PAGE = r"""<!doctype html>
