@@ -32,6 +32,10 @@ Constraint: use as few paid drafts as possible.
   2. Card database (Scryfall IDs link Arena and MTGO card IDs)
   3. Ranking model
   4. Overlay
+- No signals (2026-11-27): the picker will not read what other drafters are passing or
+  estimate wheels. It values cards only by the deck being built.
+- No rarity for cube (2026-11-27): rarity must not be a factor in cube card values
+  (including any fallback value for cards without data).
 
 ## Deferred questions (revisit when relevant)
 - Overlay style: solid blackout or dim? Show scores on visible cards? What happens when the
@@ -184,7 +188,6 @@ Constraint: use as few paid drafts as possible.
 - Bot color mix vs humans (see the mana-aware section): too often 3 colors in TRK,
   too rarely splashes/3 colors in cube. And wins/agree is lower than the deck-aware
   scorer's on all three test splits (each within noise). Worth a look.
-- Optional: a pick model trained on draft data (signals, wheel estimates).
 - Merge the feature branches into main.
 
 ## Deck model results (Powered Cube PremierDraft, 2026-11-26)
@@ -324,6 +327,28 @@ whose card list will change; the live test is TRK).
   (worse). Not shipped. The per-card values already carry it: in cube, mean value by
   mana value is +0.28 SD for 1-drops and -0.44 SD for 6+; in TRK it is flat.
 - Quick/Traditional drafts use the set's Premier Draft model; lane_model.json is shared.
+
+### Bot decks vs human decks (2026-11-27, scripts/compare_decks.py)
+Same independent judge, castability-adjusted, neutral controls. Human drafts from the
+training split (never seen by the judge); bot pools from 50 simulated pods (400 decks
+per scorer). Fair comparison = both built by our deck builder (free / human-style):
+
+| judged win rate | TRK free | TRK human-style | Cube free | Cube human-style |
+|---|---|---|---|---|
+| bot, new scorer | 42.7% | 40.8% | 56.6% | 54.7% |
+| bot, old scorer | 39.6% | 35.7% | 55.8% | 53.2% |
+| humans, all | 43.6% | 41.5% | 58.9% | 57.0% |
+| humans, winning record | 43.9% | 41.7% | 60.0% | 58.2% |
+| humans, 7 wins | 45.2% | 43.2% | 60.6% | 59.0% |
+
+New-scorer bot decks are about 1 point below the average human deck in TRK and about 2
+points below in cube; 1-2 (TRK) and 3-4 (cube) points below winning-record decks. The
+judge separates human decks by record only weakly (deck quality is part of winning;
+play skill is the rest). Bot pools come from all-bot pods, where all 8 seats chase the
+same cards; humans' varied preferences leave more good cards per seat, so this likely
+understates the bot. "As played" human decks rate lower than our builds of the same
+pools (the builder picks the judge's best build; TRK decks rebuilt from draft data are
+also incomplete), so compare the builder rows.
 
 ### A/B test in simulated pods (2026-11-27, scripts/ab_test.py)
 - 100 pods per set, 8 bot seats alternating mana-aware (A) / deck-aware (B), each pod
