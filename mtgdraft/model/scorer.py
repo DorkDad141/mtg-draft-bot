@@ -100,20 +100,38 @@ SHRINK_PRIOR_DECKS = 50.0
 _cache: dict[tuple, "PickScorer | None"] = {}
 
 
+# The mana-aware scorer's shared settings, chosen on validation drafts of TRK, SOS and
+# Powered Cube (the same values were best for all three).
+MANA_TEMPERATURE = 0.025
+MANA_REPLACEMENT_QUANTILE = 0.5
+
+
 def load_scorer(set_code: str | None, event: str = "PremierDraft",
-                models_dir: Path = MODELS_DIR, card_info: dict | None = None):
+                models_dir: Path = MODELS_DIR, card_info: dict | None = None, kind: str = "mana"):
     """Load the trained FM for a set/event, or None if there is no model.
 
-    With `card_info` (name -> card with colors/types, e.g. ArenaCardDB().by_name()) this
-    returns the deck-aware scorer, which knows colors; without it, the plain PickScorer.
+    With `card_info` (name -> card with colors/types/text, e.g. ArenaCardDB().by_name())
+    this returns a color-aware scorer: kind "mana" (default) is the mana-aware scorer
+    (pairs, triples and splashes with real mana bases, and the lane-choice model in
+    lane_model.json when present); "deck" is the older two-color deck-aware scorer.
+    Without card_info, the plain PickScorer.
     """
-    key = (set_code, event, str(models_dir), card_info is not None)
+    key = (set_code, event, str(models_dir), card_info is not None, kind)
     if key not in _cache:
         path = Path(models_dir) / f"fm.{set_code}.{event}.npz"
         if set_code and path.exists():
             fm, names = FactorizationMachine.load(path)
             shrink_by_evidence(fm, names.get("meta", {}).get("card_decks"))
-            if card_info is not None:
+            if card_info is not None and kind == "mana":
+                import json
+                from .mana_scorer import ManaAwareScorer
+                lane_path = Path(models_dir) / "lane_model.json"
+                lm = json.loads(lane_path.read_text()) if lane_path.exists() else {}
+                _cache[key] = ManaAwareScorer(fm, names["cards"], card_info, temperature=MANA_TEMPERATURE,
+                                              replacement_quantile=MANA_REPLACEMENT_QUANTILE,
+                                              lane_beta=lm.get("beta"), slack=lm.get("slack", 2),
+                                              splash_basics=lm.get("splash_basics", 2))
+            elif card_info is not None:
                 from .deck_scorer import DeckAwareScorer
                 _cache[key] = DeckAwareScorer(fm, names["cards"], card_info)
             else:

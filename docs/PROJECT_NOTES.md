@@ -181,7 +181,9 @@ Constraint: use as few paid drafts as possible.
   mtgdraft/overlay/locate.py for Arena's card rendering, or add more frame types.
 - Retrain TRK when 17Lands publishes TRK game data (the pipeline switches to game
   data automatically): download_17lands.py --set TRK --types draft game, then train.
-- Splash support in the deck-aware scorer (only two-color pairs today).
+- Bot color mix vs humans (see the mana-aware section): too often 3 colors in TRK,
+  too rarely splashes/3 colors in cube. And wins/agree is lower than the deck-aware
+  scorer's on all three test splits (each within noise). Worth a look.
 - Optional: a pick model trained on draft data (signals, wheel estimates).
 - Merge the feature branches into main.
 
@@ -274,7 +276,79 @@ Constraint: use as few paid drafts as possible.
 - On that draft, the SOS scorer's top pick matched the user's on 11/38 picks (29%), close
   to the 24% offline agreement rate.
 
-## Deck-aware scorer (2026-11-26, default)
+## Mana-aware scorer (2026-11-27, default)
+Goal: fixing, low curve and splashing, done generically (ship target is Powered Cube,
+whose card list will change; the live test is TRK).
+- Card data: rules text now loaded from Arena's DB (ArenaCard.text). mtgdraft/model/mana.py
+  parses pips (hybrid as either color; phyrexian and twobrid ignored) and produced colors
+  ("Add {U}", "any color", fetches by basic type, "basic land card" = any; Arcane
+  Signet/Command Tower make nothing in limited; a nonland source doesn't count for colors
+  it needs itself). Castability = exact hypergeometric P(enough sources of each color
+  by turn mv + slack) in a 40-card deck. Card-agnostic, so new cube cards work.
+- mtgdraft/model/mana_scorer.py: 70 lanes (10 pairs, 10 triples, 30 pair+splash, 20
+  triple+splash). Per lane, a 17-land base: pool nonbasics and castable mana sources making
+  lane colors, then basics: splash gets up to splash_basics minus existing fixing, the
+  rest split by the pool's pip demand. eff = p*val + (1-p)*dead. Fixers also score the
+  lane-strength gain from adding them to the mana base.
+- Lane comparison bug found and fixed: comparing lanes by value above each lane's own
+  replacement level graded deep pairs on a harder curve (a U/B drafter was put in W/U
+  with no white cards). Lanes now use the best-23 deck value over one shared baseline.
+- Hand formulas still matched humans' deck colors worse than "pair with the most
+  cards" (55% vs 62% on cube), so which lane a pool becomes is now a fitted conditional
+  logit over lanes (scripts/fit_lane_model.py, data/models/lane_model.json): 6
+  card-agnostic features (castable deck value in SDs, depth of playables, thinnest main
+  color, triple, splash, splash cards), fitted on cube + SOS training drafts together.
+  Held-out test, main colors matched: cube 69.0% (count baseline 57.8%), SOS 84.9%
+  (77.8%). Chosen slack 2, splash basics 2. It under-predicts splashes (17Lands marks a
+  single off-color card as a splash).
+- Pick evaluation (scripts/eval_picks.py --skip-old --max-drafts 800, held-out test;
+  one shared setting t=0.025, q=0.5, chosen on validation by strong drafters' top-1,
+  the same values were best for all three sets):
+
+  | set | top-1 deck-aware -> mana-aware | percentile | wins/agree |
+  |---|---|---|---|
+  | TRK | .329 -> .363 | .680 -> .741 | 2.96 -> 2.66 (+/- 0.8) |
+  | SOS | .418 -> .504 | .736 -> .812 | 2.87 -> 1.72 (+/- 0.8) |
+  | Cube | .292 -> .358 | .622 -> .706 | 4.05 -> 2.94 (+/- 0.8) |
+
+  Bot-drafted pools (200 test drafts; deck judged by the lane model): nonland cards
+  castable in the deck it becomes, humans / deck-aware / mana-aware: TRK 88/85/95%,
+  SOS 82/70/89%, cube 87/75/91%. Deck shapes: SOS close to humans (2-color 64% vs 73%);
+  TRK goes 3-color more than humans (51% vs 26%; TRK has many fixers: 38 cards make 2+
+  colors, Planets and shocks); cube splashes/3-colors less than humans (2-color 86% vs
+  56%). Wins/agree is lower on all three test splits but each within about 1.5 SE; on
+  validation it was mixed (cube higher).
+- Curve: tested deck-structure covariates (spells per mana value, creatures, lands, and
+  their squares; mtgdraft/model/structure.py, scripts/eval_structure.py). No held-out
+  gain: cube -0.00005 +/- 0.00007, TRK -0.00009 +/- 0.00008, SOS +0.00024 +/- 0.00008
+  (worse). Not shipped. The per-card values already carry it: in cube, mean value by
+  mana value is +0.28 SD for 1-drops and -0.44 SD for 6+; in TRK it is flat.
+- Quick/Traditional drafts use the set's Premier Draft model; lane_model.json is shared.
+
+### A/B test in simulated pods (2026-11-27, scripts/ab_test.py)
+- 100 pods per set, 8 bot seats alternating mana-aware (A) / deck-aware (B), each pod
+  replayed with seats swapped; 24 real opening packs per pod from held-out 17Lands drafts.
+- Judge: an FM trained only on val+test drafts (data/models/judge.<set>.<event>.npz),
+  which the scorers' model never saw. Decks: one neutral builder for both; each spell's
+  uncastable share (1 - p) is valued as a dead card (5th-percentile value), because the
+  judge alone happily plays uncastable cards (its training decks never have any). Two
+  builds: "free" (colors the judge likes best) and "human-style" (colors from the
+  lane-choice model, then the best 23).
+- Judged win rate, A - B (SE over pods):
+
+  | set | free build | human-style build | scorers' own model (free) |
+  |---|---|---|---|
+  | TRK | +2.77 +/- 0.47 pts | +4.53 +/- 0.47 | +3.29 +/- 0.34 |
+  | Cube | +1.59 +/- 0.43 | +2.46 +/- 0.44 | +0.27 +/- 0.29 |
+
+  Deck spells' mean castability A vs B: TRK 0.96 vs 0.86, cube 0.98 vs 0.89. Lands picked
+  per pool: TRK 5.7 vs 3.0, cube 10.6 vs 6.5 (the new scorer takes fixing much earlier).
+- Caveats: win rates are the judge's predictions, not games; all seats are bots (no human
+  signals); the castability math and the lane-choice model are shared by scorer A and the
+  builder (the free build and the judge are independent of A). Bot-only pods also make
+  free-built decks wide (3+splash 47-61% in TRK), more than humans build.
+
+## Deck-aware scorer (2026-11-26, previous default)
 - Problem found: the plain scorer (card value + synergy with the whole pool) was
   color-blind. Bot-drafted SOS pools had only 50% of nonland cards castable in their best
   two colors (humans: 63% on the user's draft), because off-color pair penalties are about

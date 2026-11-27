@@ -124,15 +124,26 @@ Register-ScheduledTask -TaskName "MTG draft log archiver" -Action $a -Trigger $t
 
 ## Scorers
 
-- **deck** (default): deck-aware. Projects the pool onto the ten two-color decks it
+- **mana** (default): mana-aware. Considers 70 possible decks (each color pair, each
+  three-color deck, and each of those with a splash). For each it builds a 17-land mana
+  base from the pool (duals, fetches, Signets, Moxen and dorks are recognised from
+  their rules text) and values every card by its chance of being castable, using exact
+  hypergeometric odds. So a single-pip bomb can be splashed, double-pip cards can't,
+  and fixing is valued by how much castability it adds to the pool. Which deck a pool
+  becomes is predicted by a small lane-choice model fitted on what humans actually
+  built (cube and SOS game data; 6 shared weights, applied to every set). Build it
+  with `python scripts/fit_lane_model.py` (data/models/lane_model.json).
+- **deck**: the older deck-aware scorer. Projects the pool onto the ten two-color decks it
   could become, weights them by strength, and scores each card by how much it
-  improves those likely decks beyond a replacement-level card. Off-color cards and
-  cards that wouldn't make the deck score near zero, so the bot commits to a lane
-  and stops counting early picks that don't fit. Needs Arena's card database for
-  card colors.
+  improves those likely decks beyond a replacement-level card (two-color decks only,
+  no splashes). Needs Arena's card database for card colors.
 - **plain**: card value plus synergy with every card in the pool, regardless of color.
 
-`show_draft.py` and `simulate_live_log.py` take `--scorer deck|plain`.
+`show_draft.py` and `simulate_live_log.py` take `--scorer mana|deck|plain`. Calibration
+and checks: `scripts/eval_mana.py`, `scripts/fit_lane_model.py`, `scripts/eval_structure.py`,
+and `scripts/eval_picks.py` (which compares the deck-aware and mana-aware scorers).
+`scripts/ab_test.py --set TRK --pods 100` runs an A/B test of two scorers in simulated
+8-player pods, with decks judged by a model trained only on held-out drafts.
 
 ## Simulating a live draft
 

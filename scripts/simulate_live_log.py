@@ -54,7 +54,8 @@ class Watcher:
 
     def __init__(self, db: ArenaCardDB, top: int | None, pick_source: dict, card_info: dict | None = None):
         self.db = db
-        self.card_info = card_info          # set -> deck-aware scorer; None -> plain scorer
+        self.card_info = card_info          # set -> color-aware scorer; None -> plain scorer
+        self.kind = "mana"
         self.top = top
         self.pick_source = pick_source      # slot -> "logged" / "inferred" / "bot"
         self.ranked: dict = {}              # slot -> [(name, score), ...]
@@ -64,7 +65,7 @@ class Watcher:
 
     def scorer(self, d: DraftState) -> PickScorer | None:
         set_code, event = set_and_event(d, lambda g: (self.db.get(g).set_code if self.db.get(g) else "?"))
-        return load_scorer(set_code, event, card_info=self.card_info)
+        return load_scorer(set_code, event, card_info=self.card_info, kind=self.kind)
 
     def __call__(self, d: DraftState, kind: str) -> None:
         with self.lock:
@@ -143,14 +144,14 @@ def main() -> int:
     ap.add_argument("--top", type=int, default=None, help="Show only the top N cards per pack (default: all)")
     ap.add_argument("--bot-picks", action="store_true", help="Let the bot make picks that are unknown")
     ap.add_argument("--no-watch", action="store_true", help="Only write the simulated log")
-    ap.add_argument("--scorer", choices=["deck", "plain"], default="deck",
-                    help="deck: deck-aware scorer that commits to colors (default); plain: card value + pool synergy")
+    ap.add_argument("--scorer", choices=["mana", "deck", "plain"], default="mana",
+                    help="mana: pairs, triples and splashes with real mana bases (default); deck: older two-color scorer; plain: card value + pool synergy")
     ap.add_argument("--report", nargs="?", const="auto", default=None, metavar="PATH",
                     help="Also write an HTML report of every step (default path data/reports/draft_<id>.html)")
     args = ap.parse_args()
 
     db = ArenaCardDB()
-    card_info = db.by_name() if args.scorer == "deck" else None
+    card_info = db.by_name() if args.scorer != "plain" else None
     src = ArenaLogReader()
     for p in args.logs:
         src.feed(open_log(p))
@@ -166,7 +167,7 @@ def main() -> int:
     d = choose_draft(src.drafts, args.draft)
     event_name = d.event_name or "Unknown_Draft"
     set_code, event = set_and_event(d, lambda g: (db.get(g).set_code if db.get(g) else "?"))
-    bot = load_scorer(set_code, event, card_info=card_info)
+    bot = load_scorer(set_code, event, card_info=card_info, kind=args.scorer if args.scorer != "plain" else "mana")
     print(f"Simulating {d.summary()}")
     print(f"Set {set_code}, {event}; model: {'yes' if bot else 'NONE (train one with train_deck_model.py)'}")
     print(f"Writing {args.out}")
@@ -201,6 +202,7 @@ def main() -> int:
     poll = 0.05
     if not args.no_watch:
         watcher = Watcher(db, args.top, pick_source, card_info)
+        watcher.kind = args.scorer if args.scorer != "plain" else "mana"
         stop = threading.Event()
         live = ArenaLogReader(on_update=watcher)
         thread = threading.Thread(target=live.follow, args=(args.out, poll, stop.is_set), daemon=True)
@@ -227,7 +229,7 @@ def main() -> int:
         if unknown:
             print(f"{len(unknown)} picks unknown and skipped (use --bot-picks to let the bot pick).")
         if args.report:
-            suffix = "" if args.scorer == "deck" else "_plain"
+            suffix = "" if args.scorer == "mana" else f"_{args.scorer}"
             path = Path(args.report) if args.report != "auto" else REPORTS_DIR / f"draft_{d.draft_id[:8]}{suffix}.html"
             path.parent.mkdir(parents=True, exist_ok=True)
             mode = " (bot made the unknown picks)" if n else ""

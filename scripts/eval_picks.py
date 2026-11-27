@@ -38,6 +38,7 @@ from mtgdraft.model.drafts import load_picks  # noqa: E402
 from mtgdraft.model.fm import FactorizationMachine  # noqa: E402
 from mtgdraft.model.games import load_deck_data, split_label  # noqa: E402
 from mtgdraft.model.deck_scorer import PAIRS, DeckAwareScorer  # noqa: E402
+from mtgdraft.model.mana_scorer import ManaAwareScorer  # noqa: E402
 from mtgdraft.model.scorer import PickScorer, linear_scorer  # noqa: E402
 
 STRONG_WR, STRONG_GAMES = 0.60, 50
@@ -107,14 +108,19 @@ def pool_fit(names: list[str], info: dict) -> float:
     return max(sum(1 for cs in cols if cs <= set(pair)) for pair in PAIRS) / len(cols)
 
 
-def color_fit(scorer, picks_all, rows: np.ndarray, card_names, info, n_drafts: int) -> tuple[float, float]:
+def color_fit(scorer, picks_all, rows: np.ndarray, card_names, info, n_drafts: int, judge=None):
     """Bot drafts its own pool along the packs each human saw; returns (bot fit, human fit).
 
+    With `judge` (a ManaAwareScorer with the lane-choice model), also returns the shape
+    of the deck each final pool becomes (2 / 2+splash / 3 / 3+splash), for bot and human,
+    and the share of nonland cards castable (p >= 0.5) in that deck.
     Approximate: later packs still reflect the human's picks, not the bot's."""
     meta = picks_all.meta.iloc[rows]
     drafts = sorted(meta["draft_id"].unique())[:n_drafts]
     by_draft = meta[meta["draft_id"].isin(drafts)].groupby("draft_id")
     bot_fits, human_fits = [], []
+    shapes = {"bot": {}, "human": {}}
+    deck_fit = {"bot": [], "human": []}
     for _, g in by_draft:
         g = g.sort_values(["pack_number", "pick_number"])
         pool: list[str] = []
@@ -128,7 +134,16 @@ def color_fit(scorer, picks_all, rows: np.ndarray, card_names, info, n_drafts: i
             human.append(card_names[picks_all.pick[last]])
         bot_fits.append(pool_fit(pool, info))
         human_fits.append(pool_fit(human, info))
-    return float(np.nanmean(bot_fits)), float(np.nanmean(human_fits))
+        if judge is not None:
+            for who, pl in (("bot", pool), ("human", human)):
+                main, spl = judge.best_lane(pl)
+                key = f"{len(main)}" + ("+splash" if spl else "")
+                shapes[who][key] = shapes[who].get(key, 0) + 1
+                deck_fit[who].append(judge.castable_share(pl, (main, spl)))
+    if judge is None:
+        return float(np.nanmean(bot_fits)), float(np.nanmean(human_fits))
+    return (float(np.nanmean(bot_fits)), float(np.nanmean(human_fits)), shapes,
+            {k: float(np.nanmean(v)) for k, v in deck_fit.items()})
 
 
 def main() -> int:
@@ -140,6 +155,11 @@ def main() -> int:
                     help="Deck-aware scorer: pair softmax temperatures to try on validation")
     ap.add_argument("--deck-quantiles", type=float, nargs="+", default=[0.5, 0.7],
                     help="Deck-aware scorer: replacement-level quantiles to try on validation")
+    ap.add_argument("--mana-temps", type=float, nargs="+", default=[0.025, 0.05, 0.1],
+                    help="Mana-aware scorer: lane-weight temperatures to try on validation (0.05 = calibrated)")
+    ap.add_argument("--mana-quantiles", type=float, nargs="+", default=[0.5, 0.7])
+    ap.add_argument("--max-drafts", type=int, default=0, help="Evaluate on at most this many drafts per split")
+    ap.add_argument("--skip-old", action="store_true", help="Only run the deck-aware (chosen) and mana-aware scorers")
     ap.add_argument("--fit-drafts", type=int, default=300,
                     help="Drafts per split for the bot color-fit check (0 to skip)")
     args = ap.parse_args()
@@ -171,9 +191,22 @@ def main() -> int:
     def deck(t, q):
         return DeckAwareScorer(fm, card_names, info, temperature=t, replacement_quantile=q)
 
+    lane_path = models / "lane_model.json"
+    lane_model = json.loads(lane_path.read_text()) if lane_path.exists() else None
+
+    def mana(t, q):
+        lm = lane_model or {}
+        return ManaAwareScorer(fm, card_names, info, temperature=t, replacement_quantile=q,
+                               lane_beta=lm.get("beta"), slack=lm.get("slack", 2), splash_basics=lm.get("splash_basics", 2))
+
     out, best_deck, best_wpa = {}, None, float("-inf")
+    best_mana, best_mana_key = None, float("-inf")
     for split_name, split_id in (("val", 1), ("test", 2)):
-        keep = np.flatnonzero((lab == split_id) & (pack_size > 1) & (picks_all.pick >= 0))
+        in_split = lab == split_id
+        if args.max_drafts:
+            chosen_ids = set(sorted(set(picks_all.meta["draft_id"][in_split]))[:args.max_drafts])
+            in_split &= picks_all.meta["draft_id"].isin(chosen_ids).to_numpy()
+        keep = np.flatnonzero(in_split & (pack_size > 1) & (picks_all.pick >= 0))
         from mtgdraft.model.drafts import PickData
         picks = PickData(picks_all.pack[keep], picks_all.pool[keep], picks_all.pick[keep],
                          picks_all.meta.iloc[keep].reset_index(drop=True))
@@ -183,26 +216,51 @@ def main() -> int:
         print(f"\n{split_name}: {picks.n} picks from {m['draft_id'].nunique()} drafts "
               f"({strong.mean():.0%} by strong drafters); stages P1 early = P1P2-P1P5, P1 late, P2-P3")
         res = []
-        evaluate("card win rate", linear_scorer(lwr, card_names), picks, strong, stage, res)
-        evaluate("logreg value", linear_scorer(lr.w_card, card_names), picks, strong, stage, res)
-        evaluate("fm value only", PickScorer(fm, card_names, 0.0), picks, strong, stage, res)
-        for a in args.synergy:
-            evaluate(f"fm + synergy x{a:g}", PickScorer(fm, card_names, a), picks, strong, stage, res)
+        if not args.skip_old:
+            evaluate("card win rate", linear_scorer(lwr, card_names), picks, strong, stage, res)
+            evaluate("logreg value", linear_scorer(lr.w_card, card_names), picks, strong, stage, res)
+            evaluate("fm value only", PickScorer(fm, card_names, 0.0), picks, strong, stage, res)
+            for a in args.synergy:
+                evaluate(f"fm + synergy x{a:g}", PickScorer(fm, card_names, a), picks, strong, stage, res)
         if info is not None:
             # Tune on validation (by wins/agree); on test, report only the chosen setting.
             grid = [(t, q) for t in args.deck_temps for q in args.deck_quantiles] if split_name == "val" else [best_deck]
+            if args.skip_old and split_name == "val":
+                grid = [(0.05, 0.7)]                                  # the setting chosen earlier
             for t, q in grid:
                 r = evaluate(f"deck-aware t={t:g} q={q:g}", deck(t, q), picks, strong, stage, res)
                 if split_name == "val" and r["wins_per_agree"] > best_wpa:
                     best_deck, best_wpa = (t, q), r["wins_per_agree"]
+            # Mana-aware: tuned on validation by strong drafters' top-1 agreement (lower noise
+            # than wins/agree, which is reported alongside).
+            grid = [(t, q) for t in args.mana_temps for q in args.mana_quantiles] if split_name == "val" else [best_mana]
+            for t, q in grid:
+                r = evaluate(f"mana-aware t={t:g} q={q:g}", mana(t, q), picks, strong, stage, res)
+                if split_name == "val" and r["top1_strong"] > best_mana_key:
+                    best_mana, best_mana_key = (t, q), r["top1_strong"]
             if args.fit_drafts:
                 rows = np.flatnonzero(lab == split_id)
                 fm_fit, human_fit = color_fit(PickScorer(fm, card_names, 1.0), picks_all, rows, card_names, info, args.fit_drafts)
-                dk_fit, _ = color_fit(deck(*best_deck), picks_all, rows, card_names, info, args.fit_drafts)
+                judge = mana(0.05, 0.7)
+                dk_fit, _, dk_shapes, dk_deck = color_fit(deck(*best_deck), picks_all, rows, card_names, info,
+                                                          args.fit_drafts, judge)
+                mn_fit, _, mn_shapes, mn_deck = color_fit(mana(*best_mana), picks_all, rows, card_names, info,
+                                                          args.fit_drafts, judge)
                 print(f"  color fit (share of nonland cards castable in best 2-color pair, {args.fit_drafts} drafts): "
-                      f"humans {human_fit:.0%} | fm + synergy {fm_fit:.0%} | deck-aware {dk_fit:.0%}", flush=True)
+                      f"humans {human_fit:.0%} | fm + synergy {fm_fit:.0%} | deck-aware {dk_fit:.0%} | "
+                      f"mana-aware {mn_fit:.0%}", flush=True)
+                n = max(1, args.fit_drafts)
+                fmt = lambda c: " ".join(f"{k} {v / n:.0%}" for k, v in sorted(c.items()))
+                print(f"  deck the final pool becomes (lane model): humans {fmt(dk_shapes['human'])} | "
+                      f"deck-aware {fmt(dk_shapes['bot'])} | mana-aware {fmt(mn_shapes['bot'])}")
+                print(f"  share of nonland pool cards castable in that deck: humans {dk_deck['human']:.0%} | "
+                      f"deck-aware {dk_deck['bot']:.0%} | mana-aware {mn_deck['bot']:.0%}", flush=True)
                 res.append({"scorer": "color_fit", "human": human_fit, "fm_synergy": fm_fit,
-                            "deck_aware": dk_fit, "deck_setting": best_deck, "n_drafts": args.fit_drafts})
+                            "deck_aware": dk_fit, "mana_aware": mn_fit, "deck_setting": best_deck,
+                            "mana_setting": best_mana, "shapes": {"human": dk_shapes["human"], "deck_aware":
+                            dk_shapes["bot"], "mana_aware": mn_shapes["bot"]},
+                            "castable_share": {"human": dk_deck["human"], "deck_aware": dk_deck["bot"],
+                                               "mana_aware": mn_deck["bot"]}, "n_drafts": args.fit_drafts})
         out[split_name] = res
 
     path = models / f"pick_eval.{args.set}.{args.event}.json"

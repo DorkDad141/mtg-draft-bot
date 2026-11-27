@@ -27,10 +27,11 @@ from mtgdraft.reader.arena_log import set_and_event  # noqa: E402
 
 
 CARD_INFO: dict | None = None
+KIND = "mana"
 
 
 def scorer_for(set_code, event):
-    return load_scorer(set_code, event, card_info=CARD_INFO)
+    return load_scorer(set_code, event, card_info=CARD_INFO, kind=KIND)
 
 
 def _fmt(name: str, score: float) -> str:
@@ -86,12 +87,13 @@ def main() -> int:
     ap.add_argument("logs", nargs="*", help="Player-prev.log / Player.log or archived .log.gz files, oldest first")
     ap.add_argument("--live", action="store_true", help="Follow the running Arena Player.log")
     ap.add_argument("--top", type=int, default=3)
-    ap.add_argument("--scorer", choices=["deck", "plain"], default="deck",
-                    help="deck: deck-aware scorer that commits to colors (default); plain: card value + pool synergy")
+    ap.add_argument("--scorer", choices=["mana", "deck", "plain"], default="mana",
+                    help="mana: pairs, triples and splashes with real mana bases (default); deck: older two-color scorer; plain: card value + pool synergy")
     args = ap.parse_args()
     db = ArenaCardDB()
-    global CARD_INFO
-    CARD_INFO = db.by_name() if args.scorer == "deck" else None
+    global CARD_INFO, KIND
+    KIND = args.scorer if args.scorer != "plain" else "mana"
+    CARD_INFO = db.by_name() if args.scorer != "plain" else None
 
     if args.live:
         sys.stdout.reconfigure(line_buffering=True)   # show each pack immediately, even when piped

@@ -50,6 +50,7 @@ class ArenaCard:
     types: tuple = ()           # e.g. ("Creature",)
     mana_cost: str = ""         # e.g. "{1}{U}"
     mana_value: int = 0
+    text: str = ""              # rules text, one ability per line; mana symbols look like {oU}
 
 
 def _colors(field: str) -> str:
@@ -72,6 +73,16 @@ def _parse_mana(text: str) -> tuple[str, int]:
     return "".join("{" + t.strip("()") + "}" for t in symbols), mv
 
 
+def _ability_text(ability_ids: str | None, texts: dict[int, str]) -> str:
+    """'aid:textid,aid:textid' -> the abilities' rules text, one per line."""
+    out = []
+    for part in (ability_ids or "").split(","):
+        _, _, tid = part.partition(":")
+        if tid.isdigit() and int(tid) in texts:
+            out.append(_TAG.sub("", texts[int(tid)]).strip())
+    return "\n".join(out)
+
+
 class ArenaCardDB:
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path else find_arena_card_db()
@@ -81,14 +92,17 @@ class ArenaCardDB:
             rows = con.execute(
                 """
                 SELECT c.GrpId, l.Loc, l.Formatted, c.ExpansionCode, c.Rarity, c.CollectorNumber,
-                       c.Colors, c.ColorIdentity, c.Types, c.OldSchoolManaText
+                       c.Colors, c.ColorIdentity, c.Types, c.OldSchoolManaText, c.AbilityIds
                 FROM Cards c JOIN Localizations_enUS l ON l.LocId = c.TitleId
                 ORDER BY c.GrpId, l.Formatted
                 """).fetchall()
+            texts: dict[int, str] = {}
+            for loc_id, loc in con.execute("SELECT LocId, Loc FROM Localizations_enUS ORDER BY LocId, Formatted DESC"):
+                texts[loc_id] = loc            # Formatted=0 (plain text) comes last, so it wins
         finally:
             con.close()
         self._cards: dict[int, ArenaCard] = {}
-        for grp, loc, _fmt, exp, rar, cn, colors, ident, types, mana in rows:
+        for grp, loc, _fmt, exp, rar, cn, colors, ident, types, mana, abilities in rows:
             if grp in self._cards or loc is None:
                 continue
             cost, mv = _parse_mana(mana or "")
@@ -96,7 +110,7 @@ class ArenaCardDB:
                 grp, _TAG.sub("", loc).strip(), exp or "", RARITY.get(rar, str(rar)), str(cn or ""),
                 colors=_colors(colors), color_identity=_colors(ident),
                 types=tuple(CARD_TYPE.get(t, t) for t in (types or "").split(",") if t),
-                mana_cost=cost, mana_value=mv)
+                mana_cost=cost, mana_value=mv, text=_ability_text(abilities, texts))
 
     def __len__(self) -> int:
         return len(self._cards)

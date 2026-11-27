@@ -24,6 +24,7 @@ to revisit later, and the data source details. Keep it up to date when decisions
 - Live assistant: `scripts/draft_assistant.py --top N` (rehearse with `--sim-17lands SET --fake-screen`).
 - Step-by-step live test: `docs/TRK_TEST.md`.
 - Modules: reader `mtgdraft/reader/` (incl. log archive and simulated logs), card DB
-  `mtgdraft/carddb/`, ranking model `mtgdraft/model/` (deck-aware scorer is the default),
+  `mtgdraft/carddb/`, ranking model `mtgdraft/model/` (mana-aware scorer is the default;
+  its lane-choice model is data/models/lane_model.json from scripts/fit_lane_model.py),
   overlay `mtgdraft/overlay/`, glue `mtgdraft/assistant.py`.
 - Every Arena session's log is archived in `logs/archive/` (git-ignored).
