@@ -4,8 +4,10 @@
   top N highlighted. Works in any Arena window mode.
 * Blackout: a borderless, click-through, always-on-top window covering the screen.
   It is fully transparent except for black boxes over the pack cards that are NOT in
-  the top N, plus a small rank badge on each top card. It is excluded from screen
-  capture, so it never hides cards from the locator's screenshots.
+  the top N, plus a small rank badge on each top card. Live, the locator captures
+  Arena's own window, so the overlay never hides cards from it. (Excluding the overlay
+  from screen capture also hides it on screen over Arena, so that is only used in
+  rehearsals, which capture the whole screen.)
 
 Arena must run in windowed or borderless-windowed mode for any window to draw over
 it; true exclusive fullscreen hides other windows.
@@ -50,7 +52,11 @@ def _hwnd(win: tk.Misc) -> int:
 
 class OverlayUI:
     def __init__(self, top_n: int, blackout: bool = True, opacity: float = 1.0,
-                 exclude_from_capture: bool = True, title: str = "Draft assistant"):
+                 exclude_from_capture: bool = True, title: str = "Draft assistant",
+                 only_over: str | None = None):
+        """only_over: a window title (e.g. "MTGA"). When set, the blackout is shown only while
+        that window (or one of ours) is the active window, and the advisor stays on top only
+        then, so other windows can be used normally."""
         self.top_n = top_n
         self.opacity = opacity
         self.advisor_rect = None     # screen box of the advisor panel (kept uncovered), for recordings
@@ -95,6 +101,7 @@ class OverlayUI:
             self.canvas = tk.Canvas(ov, bg=KEY, highlightthickness=0)
             self.canvas.pack(fill="both", expand=True)
             self.overlay = ov
+            self._ov_hwnd = _hwnd(ov)
             if sys.platform == "win32":
                 h = _hwnd(ov)
                 u = ctypes.windll.user32
@@ -103,6 +110,9 @@ class OverlayUI:
                                  WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
                 if exclude_from_capture:
                     u.SetWindowDisplayAffinity(h, WDA_EXCLUDEFROMCAPTURE)
+        self.only_over = only_over if sys.platform == "win32" else None
+        self._active = True
+        self._last_gate = 0.0
         self.root.after(20, self._poll)
 
     # ---- thread-safe API ------------------------------------------------------
@@ -170,9 +180,43 @@ class OverlayUI:
         self.root.mainloop()
 
     # ---- Tk thread --------------------------------------------------------------
+    def _gate(self) -> None:
+        """Show the blackout (and keep the advisor on top) only while Arena or our own window is active."""
+        if not self.only_over:
+            return
+        import os
+        import time as _t
+        now = _t.monotonic()
+        if now - self._last_gate < 0.2:
+            return
+        self._last_gate = now
+        u = ctypes.windll.user32
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        fg = u.GetForegroundWindow()
+        active = False
+        if fg:
+            pid = ctypes.c_ulong()
+            u.GetWindowThreadProcessId(ctypes.c_void_p(fg), ctypes.byref(pid))
+            buf = ctypes.create_unicode_buffer(256)
+            u.GetWindowTextW(ctypes.c_void_p(fg), buf, 256)
+            active = pid.value == os.getpid() or buf.value == self.only_over
+        if active == self._active:
+            return
+        self._active = active
+        if self.overlay is not None:
+            u.ShowWindow(ctypes.c_void_p(self._ov_hwnd), 4 if active else 0)    # SW_SHOWNOACTIVATE / SW_HIDE
+            if active:
+                self._keep_on_top()
+        self.root.attributes("-topmost", active)
+
     def _poll(self) -> None:
         if self.closed:
             return
+        try:
+            self._gate()
+        except Exception as e:  # never let the gate stop the UI loop
+            print(f"[ui] gate check failed: {e!r}", flush=True)
+            self.only_over = None
         while True:
             try:
                 msg = self.q.get_nowait()
@@ -216,7 +260,8 @@ class OverlayUI:
     def _do_boxes(self, black, badges, cover=None, holes=(), message=""):
         if self.overlay is None:
             return
-        self._keep_on_top()
+        if self._active:
+            self._keep_on_top()
         if os.environ.get("MTGDRAFT_TRACE"):
             print(f"[trace {time.time():.3f}] overlay: cover={'full' if cover == 'full' else bool(cover)} "
                   f"holes={len(holes)} boxes={len(black)}", flush=True)

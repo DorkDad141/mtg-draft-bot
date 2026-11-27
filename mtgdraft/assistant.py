@@ -32,7 +32,7 @@ from .reader import DraftState
 from .reader.arena_log import set_and_event
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-REGION_FILE = REPO_ROOT / "data" / "overlay_region.json"
+REGION_FILE = REPO_ROOT / "data" / "overlay_region_v2.json"     # v2: pack-sized boxes only, no deck panel
 FULL_COVER_SECONDS = 3.0     # cover the whole screen at most this long while the pack area is unknown
 NOT_FOUND_SECONDS = 3.0      # lift the cover if no card is found this long (Arena hidden or minimized)
 
@@ -232,13 +232,30 @@ class DraftAssistant:
             return None
 
     def _learn_region(self, boxes) -> None:
-        """Grow the pack area to cover every card box found (with a margin), and save it."""
+        """Grow the pack area to cover the pack's card boxes (with a margin), and save it.
+
+        Only boxes the size of a normal pack card count (a hovered card is shown enlarged),
+        and the area never reaches into Arena's deck panel (the right 22% of the window),
+        where picked cards and their previews also match."""
+        boxes = [tuple(b) for b in boxes]
+        if not boxes:
+            return
+        heights = np.array([b[3] - b[1] for b in boxes], float)
+        med = float(np.median(heights))
+        screen_w = self.screen_size[0] if self.screen_size and self.screen_size[0] else None
+        if screen_w is None:
+            self._screen_key()
+            screen_w = self.screen_size[0] or 10 ** 6
+        limit_x = int(0.78 * screen_w)
+        boxes = [b for b, h in zip(boxes, heights) if abs(h / med - 1) < 0.2 and b[2] <= limit_x + 0.05 * med]
+        if len(boxes) < 3:
+            return
         x0 = min(b[0] for b in boxes)
         y0 = min(b[1] for b in boxes)
         x1 = max(b[2] for b in boxes)
         y1 = max(b[3] for b in boxes)
         pad = int(0.06 * max(b[3] - b[1] for b in boxes))
-        new = (max(0, x0 - pad), max(0, y0 - pad), x1 + pad, y1 + pad)
+        new = (max(0, x0 - pad), max(0, y0 - pad), min(x1 + pad, limit_x), y1 + pad)
         old = self.region
         if old:
             new = (min(old[0], new[0]), min(old[1], new[1]), max(old[2], new[2]), max(old[3], new[3]))
@@ -327,6 +344,7 @@ class DraftAssistant:
                 if cur.boxes is None:
                     cur.boxes = {}
                 fresh: dict = {}
+                fresh_found = list(found)
                 for f in found:
                     fresh.setdefault(f.key, []).append(f)
                 cur.boxes.update(fresh)
@@ -343,7 +361,13 @@ class DraftAssistant:
                     drawn = {"black": [f.card_box for f in found if f.key not in cur.top_keys], "badges": badges}
                     self.ui.set_boxes(drawn["black"], badges)
                 elif found:
-                    self._learn_region([f.card_box for f in found])
+                    # Learn the pack area only from cards that have stopped moving (Arena slides
+                    # new packs in): boxes in the same place as in the previous check.
+                    from .overlay.locate import _box_iou
+                    prev = getattr(cur, "prev_boxes", None) or []
+                    stable = [f.card_box for f in found if any(_box_iou(f.card_box, b) > 0.9 for b in prev)]
+                    cur.prev_boxes = [f.card_box for f in fresh_found]
+                    self._learn_region(stable)
                     holes = [b for b, _ in badges] if cur.top_keys else [f.card_box for f in found]
                     drawn = {"cover": self.region, "holes": holes, "badges": badges}
                     self.ui.set_boxes([], badges, cover=self.region, holes=holes)
@@ -356,12 +380,32 @@ class DraftAssistant:
                 self.ui.set_status(f"Found {len(found)}/{len(cur.pack)} cards on screen; "
                                    f"top {len(cur.top_keys)} visible: {tops_found}"
                                    + ("" if found else "  (is the pack on screen? Arena must not be minimized)"))
-            # Re-check about once a second, but at once when a new pack arrives.
-            if self.wake.wait(max(0.0, self.interval - (time.time() - t0))):
+            # Re-check about once a second, but every 0.25 s until all the top cards are found
+            # (new packs slide in), and at once when a new pack arrives.
+            tops_seen = {k for k, fs in (cur.boxes or {}).items() if fs} & cur.top_keys
+            wait = self.interval if tops_seen >= cur.top_keys else min(self.interval, 0.25)
+            if self.wake.wait(max(0.0, wait - (time.time() - t0))):
                 self.wake.clear()
 
 
+_warned_fallback = False
+
+
 def _grab_screen() -> np.ndarray:
+    """Arena's own window if it is open (unaffected by our overlay on top), else the screen."""
+    global _warned_fallback
+    from .overlay.capture import grab_window
+    img = grab_window()
+    if img is not None:
+        return img
+    if not _warned_fallback:
+        _warned_fallback = True
+        print("[assistant] Arena window not captured (not open, minimized, or capture failed): "
+              "using a full-screen capture instead", flush=True)
+    return grab_full_screen()
+
+
+def grab_full_screen() -> np.ndarray:
+    """The whole screen (rehearsals: the fake Arena window is a normal window)."""
     from PIL import ImageGrab
-    img = ImageGrab.grab()
-    return np.asarray(img)[:, :, ::-1].copy()     # RGB -> BGR
+    return np.asarray(ImageGrab.grab())[:, :, ::-1].copy()     # RGB -> BGR

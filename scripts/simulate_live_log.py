@@ -230,11 +230,13 @@ def main() -> int:
             print(f"{len(unknown)} picks unknown and skipped (use --bot-picks to let the bot pick).")
         if args.report:
             suffix = "" if args.scorer == "mana" else f"_{args.scorer}"
-            path = Path(args.report) if args.report != "auto" else REPORTS_DIR / f"draft_{d.draft_id[:8]}{suffix}.html"
+            import re
+            short = d.draft_id[:8] if "-" in d.draft_id else re.sub(r"[^A-Za-z0-9]+", "_", d.draft_id).strip("_")
+            path = Path(args.report) if args.report != "auto" else REPORTS_DIR / f"draft_{short}{suffix}.html"
             path.parent.mkdir(parents=True, exist_ok=True)
             mode = " (bot made the unknown picks)" if n else ""
             rep = DraftReport(
-                title=f"Draft {d.draft_id[:8]} · {set_code} {event} · {args.scorer} scorer",
+                title=f"Draft {short} · {set_code} {event} · {args.scorer} scorer",
                 subtitle=f"{event_name} · simulated live from the recorded log{mode} · "
                          f"{len(d.packs)} packs, {sum(1 for v in pick_source.values() if v != 'bot')} known picks",
                 steps=[watcher.steps[k] for k in sorted(watcher.steps)])

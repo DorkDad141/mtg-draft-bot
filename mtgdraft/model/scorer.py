@@ -137,6 +137,10 @@ def load_scorer(set_code: str | None, event: str = "PremierDraft",
                 _cache[key] = DeckAwareScorer(fm, names["cards"], card_info)
             else:
                 _cache[key] = PickScorer(fm, names["cards"])
+        elif set_code and event != "PremierDraft":
+            # Quick/Traditional drafts: the decks are the same game, so the set's Premier
+            # Draft model ranks them well (we only train on Premier Draft data).
+            _cache[key] = load_scorer(set_code, "PremierDraft", models_dir, card_info, kind)
         else:
             _cache[key] = None
     return _cache[key]

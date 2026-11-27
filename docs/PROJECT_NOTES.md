@@ -178,6 +178,34 @@ Constraint: use as few paid drafts as possible.
      real Arena screens for tuning the locator, and picks for the pick model.
    - MTGDRAFT_TRACE=1 prints overlay/fake-screen timestamps for latency checks.
 
+8. First live test (2026-11-27): TRK Quick Draft, 42 picks, recorded in
+   captures/2026-11-27_13*/ (final session has all 42 packs/picks + pool; 41 of 42
+   picks have before/after screenshots across sessions). Report:
+   data/reports/draft_QuickDraft_TRK_20261119_1.html. Your pick = bot #1 on 40/42.
+   Problems found and fixed:
+   - Quick Draft messages are "BotDraftDraftStatus"/"BotDraftDraftPick" (no
+     underscore); the reader now accepts both. Pick request format matched the plan
+     (PickInfo.CardIds, 0-based numbers).
+   - The blackout was invisible: windows excluded from capture (WDA_EXCLUDEFROMCAPTURE)
+     are hidden on screen over Arena's borderless fullscreen (test: red normal box
+     visible, blue excluded box not). Live, the locator now captures Arena's own window
+     (PrintWindow PW_RENDERFULLCONTENT, ~50 ms, mtgdraft/overlay/capture.py) and the
+     overlay is not excluded. Rehearsals still capture the full screen with exclusion.
+   - The pack area grew over the deck panel: matches in the deck panel, enlarged hover
+     previews, and cards caught mid slide-in. Now learned only from pack-sized boxes
+     that stayed put between two checks, never past 78% of the screen width
+     (data/overlay_region_v2.json; learned (247,156)-(1261,999)).
+   - The overlay covered other windows: it now shows only while Arena (or the
+     advisor) is the active window; the advisor is topmost only then.
+   - The report tool had no Quick Draft model: load_scorer now falls back to the set's
+     PremierDraft model for any event.
+   Results: all top cards found on 41/41 screens; the only misses were basic lands
+   (the pack's basic slot uses different art on Arena; basics stay covered, harmless).
+   Pack logged -> first located frame: median 1.4 s (max 2.0): now re-checks every
+   0.25 s until the top cards are found (not yet tested live). Pick logged -> next
+   pack logged: median 0.26 s, so the shield rises well before the next pack shows.
+   Not checked: whether P1P1 flashed before the first cover.
+
 ### Next steps (after the first live TRK test)
 - Review the live test: console output, captures/<session>/ (before/after screenshots,
   events.jsonl), data/reports/ report. Check the shield never showed an unranked pack.

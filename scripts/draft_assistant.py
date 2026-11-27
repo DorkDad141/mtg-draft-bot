@@ -26,7 +26,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from mtgdraft.assistant import DraftAssistant  # noqa: E402
+from mtgdraft.assistant import DraftAssistant, grab_full_screen  # noqa: E402
 from mtgdraft.carddb import ArenaCardDB  # noqa: E402
 from mtgdraft.reader import ArenaLogReader, default_arena_log_path  # noqa: E402
 from mtgdraft.reader.archive import archive_logs, open_log  # noqa: E402
@@ -163,8 +163,13 @@ def main() -> int:
     if not args.console:
         from mtgdraft.overlay.window import OverlayUI, make_dpi_aware
         make_dpi_aware()
+        # Live: the card finder captures Arena's own window, so the overlay must NOT be excluded
+        # from capture (excluded windows are hidden over Arena). Rehearsals capture the whole
+        # screen (the fake Arena window), so there the overlay is excluded from capture.
         ui = OverlayUI(args.top, blackout=not args.no_overlay, opacity=args.opacity,
-                       exclude_from_capture=not args.capture_visible)
+                       exclude_from_capture=simulating and not args.capture_visible,
+                       # live: show the blackout only while Arena (or the advisor) is the active window
+                       only_over=None if simulating else "MTGA")
 
     if simulating:
         log_path = SIM_LOG
@@ -189,7 +194,7 @@ def main() -> int:
     assistant = DraftAssistant(db, top_n=args.top, ui=ui, interval=args.interval,
                                auto_train=not args.no_auto_train, shield=not args.no_shield, recorder=recorder,
                                # rehearsals use a fake window: don't save its pack area for real drafts
-                               **({"region_file": None} if simulating else {}))
+                               **({"region_file": None, "grab": grab_full_screen} if simulating else {}))
     print(f"Following {log_path}. Top {args.top} cards stay visible. Close the advisor window or Ctrl+C to stop.")
 
     stop = threading.Event()

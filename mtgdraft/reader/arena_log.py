@@ -13,14 +13,15 @@ Arena writes one line per client event. The lines used:
       Event hint when no course line is present.
 
 Quick Draft (drafting against bots) uses different messages, with no draft ID and
-0-based numbers; the response JSON may be on the marker line or the next line:
+0-based numbers; the response JSON may be on the marker line or the next line
+(older clients wrote BotDraft_DraftStatus / BotDraft_DraftPick; both are accepted):
 
-  ==> BotDraft_DraftStatus {"id":..,"request":"{\"EventName\":\"QuickDraft_TRK_20261120\"}"}
-  <== BotDraft_DraftStatus(id) / <== BotDraft_DraftPick(id), then
+  ==> BotDraftDraftStatus {"id":..,"request":"{\"EventName\":\"QuickDraft_TRK_20261120\"}"}
+  <== BotDraftDraftStatus(id) / <== BotDraftDraftPick(id), then
       {..,"Payload":"{\"EventName\":..,\"DraftStatus\":\"PickNext\",\"PackNumber\":0,
        \"PickNumber\":0,\"DraftPack\":[\"95001\",..],\"PickedCards\":[..]}"}
       The pack shown (or DraftStatus "Completed" with the whole pool in PickedCards).
-  ==> BotDraft_DraftPick {"id":..,"request":"{..,\"PickInfo\":{\"EventName\":..,
+  ==> BotDraftDraftPick {"id":..,"request":"{..,\"PickInfo\":{\"EventName\":..,
       \"CardIds\":[\"95001\"],\"PackNumber\":0,\"PickNumber\":0}}"}  (older: "CardId")
       The user's pick.
 
@@ -46,7 +47,20 @@ from .state import DraftState
 NOTIFY = "Draft.Notify "
 MAKE_PICK = "==> EventPlayerDraftMakePick "
 COMPLETE = "<== DraftCompleteDraft("
-BOT_STATUS, BOT_PICK = "BotDraft_DraftStatus", "BotDraft_DraftPick"
+# Arena writes these as "BotDraftDraftStatus" (seen live, 2026-11); older clients used an underscore.
+BOT_STATUS_NAMES = ("BotDraftDraftStatus", "BotDraft_DraftStatus")
+BOT_PICK_NAMES = ("BotDraftDraftPick", "BotDraft_DraftPick")
+
+
+def _bot_marker(line: str) -> tuple[str, bool] | None:
+    """(marker found in the line, is it a pick) for Quick Draft lines, else None."""
+    for m in BOT_PICK_NAMES:
+        if m in line:
+            return m, True
+    for m in BOT_STATUS_NAMES:
+        if m in line:
+            return m, False
+    return None
 QUEUE_RE = re.compile(r"Entering table draft queue: ([A-Za-z0-9_]+)")
 
 
@@ -194,7 +208,7 @@ class ArenaLogReader:
             if line.lstrip().startswith("{"):
                 self._bot_response(_json_after(line, ""))
                 return
-        if BOT_STATUS in line or BOT_PICK in line:
+        if "BotDraft" in line and _bot_marker(line):
             self._bot_line(line)
             return
         if NOTIFY in line:
@@ -233,7 +247,7 @@ class ArenaLogReader:
 
     # ---- Quick Draft (bot draft) -----------------------------------------------
     def _bot_line(self, line: str) -> None:
-        marker = BOT_PICK if BOT_PICK in line else BOT_STATUS
+        marker, is_pick = _bot_marker(line)
         if "<==" in line:
             j = _json_after(line, marker + "(")
             if j is None:
@@ -245,7 +259,7 @@ class ArenaLogReader:
         if j is None:
             return
         j = _parse_nested(j)
-        if marker == BOT_PICK:
+        if is_pick:
             info = _find_key(j, "PackNumber") or {}
             ids = info.get("CardIds") or ([info["CardId"]] if info.get("CardId") is not None else [])
             event = info.get("EventName") or (_find_key(j, "EventName") or {}).get("EventName")
