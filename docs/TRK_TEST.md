@@ -66,6 +66,14 @@ and logs show your account name), for future training:
 - `Player.log.gz`: the Arena log, copied when the draft completes and at exit.
 `--no-record` turns it off.
 
+When the draft ends, the assistant automatically (about 10 seconds, in the background):
+- proposes and rates your 40-card deck (`scripts/propose_deck.py`) and shows it in the
+  advisor: colors, judged win rate, and how it compares with the average human deck,
+  winning-record decks and 7-win decks;
+- rebuilds the pick-by-pick viewer (`captures\viewer_<draft>.html`, ending with a "Your
+  deck" slide) and the shareable copy in `..\draft-viewers\`. Publishing that to GitHub
+  Pages is a separate, deliberate step (push it to the gh-pages branch).
+
 Options: `--top N` (how many stay visible), `--opacity 0.85` (dim instead of solid
 black), `--no-overlay` (advisor panel only), `--console` (text only), `--no-shield` (only
 black out located cards, as before).

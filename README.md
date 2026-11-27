@@ -31,7 +31,9 @@ From each pick until the next pack is ranked, the whole pack area stays black, s
 you never see the next pack unranked. Premier, Traditional and Quick Draft logs are all
 recognised automatically; Quick/Traditional drafts use the set's Premier Draft model. Live sessions are recorded to `captures/<date_time>/`
 (screenshots before and after the blackout, rankings, picks and the Arena log) for
-future training; `--no-record` turns that off.
+future training; `--no-record` turns that off. When a recorded draft ends, the
+assistant proposes and rates your deck (shown in the advisor) and builds a pick-by-pick
+viewer with a final deck slide (`scripts/propose_deck.py`, `scripts/draft_viewer.py`).
 
 Rehearse without Arena or a paid draft, using a real 17Lands draft as a fake live
 log and a fake Arena window:

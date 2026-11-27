@@ -194,7 +194,8 @@ def main() -> int:
     assistant = DraftAssistant(db, top_n=args.top, ui=ui, interval=args.interval,
                                auto_train=not args.no_auto_train, shield=not args.no_shield, recorder=recorder,
                                # rehearsals use a fake window: don't save its pack area for real drafts
-                               **({"region_file": None, "grab": grab_full_screen} if simulating else {}))
+                               **({"region_file": None, "grab": grab_full_screen} if simulating
+                                  else {"site_dir": REPO_ROOT.parent / "draft-viewers"}))
     print(f"Following {log_path}. Top {args.top} cards stay visible. Close the advisor window or Ctrl+C to stop.")
 
     stop = threading.Event()

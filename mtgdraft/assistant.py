@@ -53,7 +53,7 @@ class DraftAssistant:
     def __init__(self, db: ArenaCardDB, top_n: int = 3, ui=None, interval: float = 1.0,
                  auto_train: bool = True, printer=print, grab=None, locate: bool = True,
                  shield: bool = True, screen_size: tuple[int, int] | None = None, recorder=None,
-                 region_file: Path | None = REGION_FILE):
+                 region_file: Path | None = REGION_FILE, site_dir: Path | None = None):
         self.db = db
         self.info = db.by_name()
         self.top_n = top_n
@@ -76,6 +76,8 @@ class DraftAssistant:
         self._training: set = set()
         self._prefetched: set = set()
         self._last_state: DraftState | None = None
+        self._decks_done: set = set()
+        self.site_dir = site_dir            # shareable copy of each finished draft's viewer (live drafts only)
         self.images = self.locator = None
         if self.locate_enabled:
             from .overlay.images import CardImageCache
@@ -202,7 +204,55 @@ class DraftAssistant:
         if self.ui:
             self.ui.clear_boxes()
             self.ui.show_pack(f"Draft complete - {len(pool)} cards", lanes_txt,
-                              [(n, "", False) for n in sorted(pool)], "Good luck!")
+                              [(n, "", False) for n in sorted(pool)],
+                              "Building and rating your deck..." if self.recorder else "Good luck!")
+        if self.recorder and d.draft_id not in self._decks_done:
+            self._decks_done.add(d.draft_id)
+            threading.Thread(target=self._after_draft, args=(d.draft_id,), daemon=True).start()
+
+    def _after_draft(self, draft_id: str) -> None:
+        """When a recorded draft ends: propose and rate the deck, show it in the advisor, and
+        rebuild the pick-by-pick viewer (plus the shareable copy in site_dir, for live drafts)."""
+        safe = "".join(ch if ch.isalnum() else "_" for ch in draft_id).strip("_")
+        deck_path = REPO_ROOT / "captures" / f"deck_{safe}.json"
+        if deck_path.exists():
+            return                      # already done (e.g. the assistant restarted and re-read the log)
+        py = sys.executable
+        viewer_cmd = [py, str(REPO_ROOT / "scripts" / "draft_viewer.py"), "--draft", draft_id]
+        if self.site_dir is not None:
+            viewer_cmd += ["--site", str(self.site_dir)]
+        steps = [("deck", [py, str(REPO_ROOT / "scripts" / "propose_deck.py"), "--draft", draft_id]),
+                 ("viewer", viewer_cmd)]
+        for name, cmd in steps:
+            r = subprocess.run(cmd, capture_output=True, text=True, cwd=REPO_ROOT)
+            if r.returncode != 0:
+                tail = " | ".join((r.stdout + r.stderr).strip().splitlines()[-3:])
+                self.print(f"[assistant] {name} step failed: {tail}")
+                if self.ui:
+                    self.ui.set_status(f"Could not build the {name}: {tail[:200]}")
+                return
+            if name == "deck":
+                self.print(r.stdout.rstrip())
+        try:
+            deck = json.loads(deck_path.read_text())["proposed"]
+        except (OSError, ValueError, KeyError) as e:
+            self.print(f"[assistant] could not read the proposed deck: {e!r}")
+            return
+        v = deck.get("vs_humans")
+        header = f"Your deck: {deck['lane']} - {100 * deck['win_rate']:.1f}% judged win rate"
+        compare = (f"Avg human deck {100 * v['avg']:.1f}%, winning decks {100 * v['avg_winning']:.1f}%, "
+                   f"7-win decks {100 * v['avg_7_wins']:.1f}%. Better than {v['percentile']:.0f}% of human decks."
+                   if v else "")
+        rows = []
+        for e in deck["spells"]:
+            low = " (!)" if e.get("castable", 1) < 0.8 else ""          # hard to cast in this mana base
+            rows.append((f"{e['mv']:>2}  {('%dx ' % e['count']) if e['count'] > 1 else ''}{e['name']}"[:30] + low,
+                         e["cost"][:10], False))
+        rows.append(("Lands: " + ", ".join(f"{x['count']} {x['name']}" for x in deck["lands"])[:60], "", False))
+        viewer = REPO_ROOT / "captures" / f"viewer_{safe}.html"
+        if self.ui:
+            self.ui.show_pack(header, compare, rows, f"Pick-by-pick viewer: {viewer}")
+        self.print(f"[assistant] pick-by-pick viewer: {viewer}")
 
     # ---- shield -----------------------------------------------------------------
     def _raise_shield(self, message: str) -> None:
